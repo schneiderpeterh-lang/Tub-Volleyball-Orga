@@ -50,8 +50,11 @@ def update_db_schema(engine):
 # 2. Verbindung aufbauen
 try:
     DB_URL = st.secrets["DB_URL"]
-    engine = create_engine(DB_URL)
-    # Erst jetzt schema initialisieren
+    # Option 'gssencmode' und explizite timeouts helfen oft bei "Cannot assign requested address"
+    engine = create_engine(
+        DB_URL, 
+        connect_args={"sslmode": "require", "connect_timeout": 10}
+    )
     update_db_schema(engine)
 except Exception as e:
     st.error(f"Datenbankfehler: {e}")
