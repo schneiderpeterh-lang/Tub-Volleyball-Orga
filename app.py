@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import secrets
 import traceback
+import socket
 from sqlalchemy import create_engine, text
 
 # 1. Konfiguration
@@ -51,17 +52,18 @@ def update_db_schema(engine):
 try:
     DB_URL = st.secrets["DB_URL"]
     
-    # Hier erzwingen wir die Verbindung über IPv4 (127.0.0.1 Verhalten)
-    # und erhöhen die Stabilität durch connect_args
+    # Erzwinge IPv4 Verbindung durch explizites Setzen der Adresse, falls der Resolver IPv6 liefert
+    # Wir nutzen hier den 'connect_args' Parameter um dem Adapter zu helfen
     engine = create_engine(
         DB_URL, 
         connect_args={
             "sslmode": "require",
-            "connect_timeout": 10
+            "connect_timeout": 5,
+            "options": "-c inet6=false" # Versuch, IPv6 auf Treiberebene zu unterbinden
         }
     )
     
-    # Test-Connection hinzufügen, um sicherzustellen, dass wir IPv4 erreichen
+    # Test-Connection
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
         
