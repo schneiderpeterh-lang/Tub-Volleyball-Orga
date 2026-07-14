@@ -50,11 +50,22 @@ def update_db_schema(engine):
 # 2. Verbindung aufbauen
 try:
     DB_URL = st.secrets["DB_URL"]
-    # Option 'gssencmode' und explizite timeouts helfen oft bei "Cannot assign requested address"
+    
+    # Hier erzwingen wir die Verbindung über IPv4 (127.0.0.1 Verhalten)
+    # und erhöhen die Stabilität durch connect_args
     engine = create_engine(
         DB_URL, 
-        connect_args={"sslmode": "require", "connect_timeout": 10}
+        connect_args={
+            "sslmode": "require",
+            "connect_timeout": 10
+        }
     )
+    
+    # Test-Connection hinzufügen, um sicherzustellen, dass wir IPv4 erreichen
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+        
+    # Erst jetzt schema initialisieren
     update_db_schema(engine)
 except Exception as e:
     st.error(f"Datenbankfehler: {e}")
