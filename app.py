@@ -3,28 +3,17 @@ import pandas as pd
 import datetime
 import hashlib
 import secrets
+import traceback
 from sqlalchemy import create_engine, text
 
 # 1. Konfiguration
 st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide")
 
-# HIER DEINEN SUPABASE CONNECTION STRING EINTRAGEN
-# Ersetze die Stelle mit DB_URL durch das hier:
-try:
-    update_db_schema()
-    st.success("Datenbank erfolgreich verbunden!")
-except Exception as e:
-    st.error(f"Datenbankfehler: {type(e).__name__} - {e}")
-    # Zusätzlich das volle Traceback für die Logs ausgeben
-    import traceback
-    st.text(traceback.format_exc())
-    st.stop()
-
 # ==========================================
-# DATENBANK-FUNKTIONEN (Cloud-Ready)
+# DATENBANK-FUNKTIONEN
 # ==========================================
 
-def update_db_schema():
+def update_db_schema(engine):
     """Initialisiert Tabellen in PostgreSQL."""
     with engine.begin() as conn:
         conn.execute(text("""
@@ -58,7 +47,16 @@ def update_db_schema():
             );
         """))
 
-update_db_schema()
+# 2. Verbindung aufbauen
+try:
+    DB_URL = st.secrets["DB_URL"]
+    engine = create_engine(DB_URL)
+    # Erst jetzt schema initialisieren
+    update_db_schema(engine)
+except Exception as e:
+    st.error(f"Datenbankfehler: {e}")
+    st.text(traceback.format_exc())
+    st.stop()
 
 # ==========================================
 # HILFSFUNKTIONEN (Passwort)
@@ -88,17 +86,11 @@ def authenticate(email, password):
     return None
 
 # ==========================================
-# LOGIK-FUNKTIONEN (Beispiele für Cloud-Ready Aktionen)
+# LOGIK-FUNKTIONEN
 # ==========================================
 
 def get_all_tasks():
     return pd.read_sql("SELECT * FROM tasks", engine)
-
-def assign_task(task_id, user_id):
-    with engine.begin() as conn:
-        conn.execute(text("UPDATE tasks SET zugewiesen_an = :user_id, tausch_angefragt = 0 WHERE task_id = :task_id"), 
-                     {"user_id": user_id, "task_id": task_id})
-    st.success("Aufgabe erfolgreich übernommen!")
 
 # ==========================================
 # MAIN UI
