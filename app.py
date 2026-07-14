@@ -11,12 +11,14 @@ st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide")
 # HIER DEINEN SUPABASE CONNECTION STRING EINTRAGEN
 # Ersetze die Stelle mit DB_URL durch das hier:
 try:
-    DB_URL = st.secrets["DB_URL"]
-    engine = create_engine(DB_URL)
-except KeyError:
-    st.error("Fehler: DB_URL wurde in den Streamlit-Secrets nicht gefunden!")
+    update_db_schema()
+    st.success("Datenbank erfolgreich verbunden!")
+except Exception as e:
+    st.error(f"Datenbankfehler: {type(e).__name__} - {e}")
+    # Zusätzlich das volle Traceback für die Logs ausgeben
+    import traceback
+    st.text(traceback.format_exc())
     st.stop()
-engine = create_engine(DB_URL)
 
 # ==========================================
 # DATENBANK-FUNKTIONEN (Cloud-Ready)
