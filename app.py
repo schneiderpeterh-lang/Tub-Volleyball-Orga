@@ -112,7 +112,7 @@ def get_all_tasks():
 # MAIN UI
 # ==========================================
 
-st.title("🏐 TuB Helfer-Orga (Cloud-Version)")
+st.title("🏐 TuB Helfer-Orga")
 
 if 'logged_in_user' not in st.session_state:
     st.session_state['logged_in_user'] = None
