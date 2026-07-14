@@ -9,7 +9,13 @@ from sqlalchemy import create_engine, text
 st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide")
 
 # HIER DEINEN SUPABASE CONNECTION STRING EINTRAGEN
-DB_URL = st.secrets["DB_URL"]
+# Ersetze die Stelle mit DB_URL durch das hier:
+try:
+    DB_URL = st.secrets["DB_URL"]
+    engine = create_engine(DB_URL)
+except KeyError:
+    st.error("Fehler: DB_URL wurde in den Streamlit-Secrets nicht gefunden!")
+    st.stop()
 engine = create_engine(DB_URL)
 
 # ==========================================
