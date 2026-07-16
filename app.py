@@ -103,6 +103,25 @@ def update_db_schema(engine):
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS betroffene_teams TEXT;"))
         except Exception:
             pass
+            
+        # NEU: Tabelle für Mehrfach-Eltern-Zuweisung
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS parent_child (
+                parent_id INTEGER REFERENCES users(user_id),
+                child_id INTEGER REFERENCES users(user_id),
+                PRIMARY KEY (parent_id, child_id)
+            );
+        """))
+        try:
+            # Daten aus alter Struktur in neue überführen (falls existent)
+            conn.execute(text("""
+                INSERT INTO parent_child (parent_id, child_id)
+                SELECT parent_id, user_id FROM users 
+                WHERE parent_id IS NOT NULL
+                ON CONFLICT DO NOTHING;
+            """))
+        except Exception:
+            pass
 
 # Schema beim Start einmal prüfen/anlegen
 try:
@@ -183,28 +202,82 @@ def add_child(parent_id, child_name, child_team_list):
     
     try:
         with engine.begin() as conn:
-            conn.execute(
+            result = conn.execute(
                 text("""
                     INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, parent_id, team)
                     VALUES (:name, :email, :hash, 'Kind', 1, :parent_id, :team)
+                    RETURNING user_id
                 """),
                 {"name": child_name, "email": dummy_email, "hash": dummy_pass, "parent_id": parent_id, "team": team_str}
             )
+            new_child_id = result.scalar()
+            
+            # Direkt in die neue Mapping-Tabelle eintragen
+            conn.execute(
+                text("INSERT INTO parent_child (parent_id, child_id) VALUES (:p, :c) ON CONFLICT DO NOTHING"),
+                {"p": parent_id, "c": new_child_id}
+            )
+            
         return True, f"{child_name} wurde erfolgreich als Familienmitglied hinzugefügt!"
     except Exception as e:
         return False, f"Fehler beim Hinzufügen: {e}"
 
+def link_existing_child(parent_id, child_id):
+    """Verknüpft ein bereits existierendes Kind mit einem weiteren Elternteil."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("INSERT INTO parent_child (parent_id, child_id) VALUES (:p, :c) ON CONFLICT DO NOTHING"),
+                {"p": parent_id, "c": child_id}
+            )
+        return True, "Kind erfolgreich verknüpft!"
+    except Exception as e:
+        return False, f"Fehler bei der Verknüpfung: {e}"
+
 def get_children(parent_id):
-    """Lädt alle Kinder eines Benutzers."""
+    """Lädt alle Kinder eines Benutzers (über beide Tabellenwege)."""
     try:
         with engine.connect() as conn:
             return pd.read_sql(
-                text("SELECT user_id, name, team FROM users WHERE parent_id = :parent_id"), 
+                text("""
+                    SELECT DISTINCT u.user_id, u.name, u.team 
+                    FROM users u 
+                    LEFT JOIN parent_child pc ON u.user_id = pc.child_id
+                    WHERE u.parent_id = :parent_id OR pc.parent_id = :parent_id
+                """), 
                 conn, 
                 params={"parent_id": parent_id}
             )
     except Exception:
         return pd.DataFrame()
+
+def get_all_children_in_db():
+    """Lädt alle Kinder, die im System existieren, um sie verknüpfen zu können."""
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(text("SELECT user_id, name, team FROM users WHERE rolle = 'Kind' ORDER BY name"), conn)
+    except Exception:
+        return pd.DataFrame()
+
+def delete_user(user_id):
+    """Löscht einen Benutzer/ein Kind und bereinigt alle zugehörigen Daten."""
+    try:
+        with engine.begin() as conn:
+            # 1. Verknüpfungen in parent_child entfernen
+            conn.execute(text("DELETE FROM parent_child WHERE parent_id = :id OR child_id = :id"), {"id": user_id})
+            
+            # 2. Alte parent_id Struktur bereinigen
+            conn.execute(text("UPDATE users SET parent_id = NULL WHERE parent_id = :id"), {"id": user_id})
+            
+            # 3. Aufgaben freigeben (nicht löschen, nur Zuweisung entfernen)
+            conn.execute(text("UPDATE tasks SET zugewiesen_an = NULL WHERE zugewiesen_an = :id"), {"id": user_id})
+            
+            # 4. Endgültig den User löschen
+            conn.execute(text("DELETE FROM users WHERE user_id = :id"), {"id": user_id})
+            
+        return True, "Der Account wurde erfolgreich und sicher gelöscht."
+    except Exception as e:
+        return False, f"Fehler beim Löschen: {e}"
 
 def authenticate(email, password):
     """Prüft E-Mail und Passwort beim Login."""
@@ -398,28 +471,48 @@ else:
     children_df = get_children(user['user_id'])
     
     with st.expander("Verwaltung öffnen"):
-        st.write("Hier kannst du Familienmitglieder (z. B. Kinder ohne eigene Mailadresse) anlegen. Du kannst später stellvertretend für sie Vereinsaufgaben übernehmen.")
+        st.write("Hier kannst du Familienmitglieder anlegen oder bestehende Kinder mit deinem Account verknüpfen. Du kannst später stellvertretend für sie Vereinsaufgaben übernehmen.")
         if not children_df.empty:
             st.table(children_df[['name', 'team']].rename(columns={'name': 'Name des Kindes', 'team': 'Mannschaft'}))
+            
+        tab_new, tab_exist = st.tabs(["➕ Neues Kind anlegen", "🔗 Bestehendes Kind verknüpfen"])
         
-        # Neues Kind hinzufügen
-        with st.form("add_child_form"):
-            col1, col2 = st.columns(2)
-            with col1:
-                child_name = st.text_input("Vor- und Nachname des Kindes")
-            with col2:
-                child_team = st.multiselect("Mannschaft(en) des Kindes", TEAM_LISTE)
-                
-            if st.form_submit_button("Familienmitglied speichern"):
-                if child_name:
-                    success, msg = add_child(user['user_id'], child_name, child_team)
-                    if success:
-                        st.success(msg)
-                        st.rerun()
+        with tab_new:
+            # Neues Kind hinzufügen
+            with st.form("add_child_form"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    child_name = st.text_input("Vor- und Nachname des Kindes")
+                with col2:
+                    child_team = st.multiselect("Mannschaft(en) des Kindes", TEAM_LISTE)
+                    
+                if st.form_submit_button("Neues Familienmitglied speichern"):
+                    if child_name:
+                        success, msg = add_child(user['user_id'], child_name, child_team)
+                        if success:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
                     else:
-                        st.error(msg)
-                else:
-                    st.warning("Bitte gib einen Namen ein.")
+                        st.warning("Bitte gib einen Namen ein.")
+                        
+        with tab_exist:
+            all_kids_df = get_all_children_in_db()
+            if not all_kids_df.empty:
+                with st.form("link_child_form"):
+                    kid_options = {row['user_id']: f"{row['name']} ({row['team']})" for _, row in all_kids_df.iterrows()}
+                    selected_kid_id = st.selectbox("Wähle ein Kind aus der Datenbank", options=list(kid_options.keys()), format_func=lambda x: kid_options[x])
+                    
+                    if st.form_submit_button("Kind mit meinem Account verknüpfen"):
+                        success, msg = link_existing_child(user['user_id'], selected_kid_id)
+                        if success:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+            else:
+                st.info("Es sind noch keine Kinder im System angelegt worden.")
 
     # --- ZENTRALER DATENABRUF ---
     try:
@@ -592,7 +685,37 @@ else:
                 # Hole alle User inkl. dem neuen 'team' Feld
                 df_users = pd.read_sql("SELECT user_id, name, email, rolle, team, dsgvo_akzeptiert, parent_id FROM users", conn)
             
-            df_users['Typ'] = df_users['parent_id'].apply(lambda x: 'Kind / Sub-Account' if pd.notnull(x) else 'Haupt-Account')
+            # Neue Typisierung: Verlässt sich primär auf die Rolle, da parent_id jetzt primär im parent_child table steht
+            df_users['Typ'] = df_users['rolle'].apply(lambda x: 'Kind / Sub-Account' if x == 'Kind' else 'Haupt-Account')
             st.dataframe(df_users[['user_id', 'name', 'email', 'rolle', 'team', 'Typ', 'dsgvo_akzeptiert']], use_container_width=True)
+            
+            # NEU: Formular zum Löschen von Benutzern oder doppelten Kindern
+            with st.expander("🗑️ Account oder doppeltes Kind löschen"):
+                with st.form("delete_user_form"):
+                    st.write("Wähle hier einen Account aus, der vollständig gelöscht werden soll (Aufgaben werden wieder freigegeben).")
+                    
+                    # Dictionary zum sauberen Anzeigen in der Selectbox
+                    user_options = {
+                        row['user_id']: f"{row['name']} ({row['Typ']}, Team: {row['team']})" 
+                        for _, row in df_users.iterrows()
+                    }
+                    
+                    selected_del_id = st.selectbox(
+                        "Zu löschender Account:", 
+                        options=list(user_options.keys()), 
+                        format_func=lambda x: user_options[x]
+                    )
+                    
+                    if st.form_submit_button("Account unwiderruflich löschen"):
+                        if selected_del_id == user['user_id']:
+                            st.error("Sicherheitsblockade: Du kannst dich nicht selbst als Admin löschen!")
+                        else:
+                            success, msg = delete_user(selected_del_id)
+                            if success:
+                                st.success(msg)
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                                
         except Exception as e:
             st.error(f"Fehler beim Laden der Benutzerliste: {e}")
