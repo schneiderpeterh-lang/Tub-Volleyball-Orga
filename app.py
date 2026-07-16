@@ -7,6 +7,13 @@ import traceback
 import uuid
 from sqlalchemy import create_engine, text
 
+# Versuch, den Cookie-Manager zu importieren (mit hilfreicher Fehlermeldung bei Fehlen)
+try:
+    from streamlit_cookies_manager import EncryptedCookieManager
+except ImportError:
+    st.error("📦 **Fehlendes Paket!** Bitte füge `streamlit-cookies-manager` zu deiner `requirements.txt` auf GitHub hinzu.")
+    st.stop()
+
 # ==========================================
 # 1. KONFIGURATION & DATENBANK-VERBINDUNG
 # ==========================================
@@ -25,6 +32,19 @@ try:
     )
 except Exception as e:
     st.error(f"Datenbankfehler beim Verbindungsaufbau: {e}")
+    st.stop()
+
+# ==========================================
+# 1.b COOKIE-MANAGER INITIALISIEREN
+# ==========================================
+# Wir nutzen das Datenbank-Passwort als sicheren Schlüssel zum Verschlüsseln der Cookies
+cookies = EncryptedCookieManager(
+    prefix="tub_orga",
+    password=DB_URL  
+)
+
+# Wichtig: Warten, bis der Browser die Cookies an den Server geschickt hat
+if not cookies.ready():
     st.stop()
 
 
@@ -46,11 +66,11 @@ def update_db_schema(engine):
             );
         """))
         
-        # NEU: Spalte für Familienverknüpfung nachträglich hinzufügen (falls Tabelle schon existiert)
+        # Spalte für Familienverknüpfung nachträglich hinzufügen (falls Tabelle schon existiert)
         try:
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES users(user_id);"))
         except Exception:
-            pass # Ignorieren, falls es in älteren Postgres-Versionen zu Fehlern führt
+            pass 
             
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS teams (
@@ -147,9 +167,8 @@ def register_new_user(name, email, password, rolle):
 
 def add_child(parent_id, child_name):
     """Fügt ein Kind hinzu, das mit dem Account des Elternteils verknüpft ist."""
-    # Generiere eine eindeutige "Dummy"-E-Mail-Adresse für die Datenbank
     dummy_email = f"kind_{uuid.uuid4().hex[:8]}@tub.lokal"
-    dummy_pass = hash_password(secrets.token_hex(16)) # Zufälliges Passwort, da sich Kinder nicht einloggen
+    dummy_pass = hash_password(secrets.token_hex(16)) 
     
     try:
         with engine.begin() as conn:
@@ -179,10 +198,22 @@ def get_children(parent_id):
 def authenticate(email, password):
     """Prüft E-Mail und Passwort beim Login."""
     with engine.connect() as conn:
-        query = text("SELECT * FROM users WHERE email = :email AND rolle != 'Kind'") # Kinder loggen sich nicht selbst ein
+        query = text("SELECT * FROM users WHERE email = :email AND rolle != 'Kind'") 
         result = conn.execute(query, {"email": email}).fetchone()
         if result and verify_password(password, result.password_hash):
             return dict(result._mapping)
+    return None
+
+def get_user_by_id(user_id):
+    """Lädt einen User anhand der ID (für den Auto-Login via Cookie)."""
+    try:
+        with engine.connect() as conn:
+            query = text("SELECT * FROM users WHERE user_id = :id AND rolle != 'Kind'")
+            result = conn.execute(query, {"id": user_id}).fetchone()
+            if result:
+                return dict(result._mapping)
+    except Exception:
+        pass
     return None
 
 def get_all_tasks():
@@ -198,9 +229,19 @@ def get_all_tasks():
 # ==========================================
 st.title("🏐 TuB Helfer-Orga")
 
-# Session-Status für Login initialisieren
+# Session-Status für Login initialisieren ODER Cookie auslesen
 if 'logged_in_user' not in st.session_state:
-    st.session_state['logged_in_user'] = None
+    
+    # 1. Zuerst prüfen: Haben wir einen gültigen Cookie aus einer alten Sitzung?
+    saved_user_id = cookies.get("logged_in_user_id")
+    
+    if saved_user_id:
+        # User aus Datenbank abrufen
+        auto_user = get_user_by_id(int(saved_user_id))
+        st.session_state['logged_in_user'] = auto_user
+    else:
+        # Kein Cookie vorhanden -> Nicht eingeloggt
+        st.session_state['logged_in_user'] = None
 
 user_count = get_user_count()
 
@@ -238,7 +279,13 @@ elif st.session_state['logged_in_user'] is None:
             if st.form_submit_button("Einloggen"):
                 user = authenticate(email, password)
                 if user:
+                    # 1. Im Session-State merken
                     st.session_state['logged_in_user'] = user
+                    
+                    # 2. Dauerhaft im verschlüsselten Cookie speichern!
+                    cookies["logged_in_user_id"] = str(user['user_id'])
+                    cookies.save()
+                    
                     st.rerun()
                 else:
                     st.error("Zugangsdaten ungültig oder Account existiert nicht.")
@@ -272,6 +319,11 @@ else:
     st.write(f"Willkommen zurück, **{user['name']}** ({user['rolle']})!")
     
     if st.button("Ausloggen"):
+        # Ausloggen bedeutet: Cookie löschen UND Session leeren
+        if "logged_in_user_id" in cookies:
+            del cookies["logged_in_user_id"]
+            cookies.save()
+            
         st.session_state['logged_in_user'] = None
         st.rerun()
         
@@ -318,10 +370,8 @@ else:
         st.subheader("👥 Admin-Bereich: Benutzerverwaltung")
         try:
             with engine.connect() as conn:
-                # Wir laden hier alle User und zeigen auch die parent_id an, um Kinder zu erkennen
                 df_users = pd.read_sql("SELECT user_id, name, email, rolle, dsgvo_akzeptiert, parent_id FROM users", conn)
             
-            # Formatierung für eine schönere Ansicht im Admin-Bereich
             df_users['Typ'] = df_users['parent_id'].apply(lambda x: 'Kind / Sub-Account' if pd.notnull(x) else 'Haupt-Account')
             st.dataframe(df_users[['user_id', 'name', 'email', 'rolle', 'Typ', 'dsgvo_akzeptiert']], use_container_width=True)
         except Exception as e:
