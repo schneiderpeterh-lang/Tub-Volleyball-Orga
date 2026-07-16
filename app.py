@@ -109,18 +109,73 @@ def get_all_tasks():
     return pd.read_sql("SELECT * FROM tasks", engine)
 
 # ==========================================
+# BENUTZER-PRÜFUNG
+# ==========================================
+
+def get_user_count():
+    """Gibt die Anzahl der registrierten Benutzer zurück."""
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
+            return result
+    except Exception:
+        return 0
+
+def create_initial_admin(name, email, password):
+    """Erstellt den allerersten Administrator in der Datenbank."""
+    hashed = hash_password(password)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert)
+                    VALUES (:name, :email, :hash, 'Admin', 1)
+                """),
+                {"name": name, "email": email, "hash": hashed}
+            )
+        return True
+    except Exception as e:
+        st.error(f"Fehler beim Erstellen des Admins: {e}")
+        return False
+
+# ==========================================
 # MAIN UI
 # ==========================================
 
 st.title("🏐 TuB Helfer-Orga")
 
+# Session State initialisieren
 if 'logged_in_user' not in st.session_state:
     st.session_state['logged_in_user'] = None
 
-if st.session_state['logged_in_user'] is None:
+user_count = get_user_count()
+
+# FALL A: Noch keine Benutzer in der Datenbank -> Setup-Modus
+if user_count == 0:
+    st.warning("⚠️ Keine Benutzer in der Datenbank gefunden. Bitte richte den ersten Admin-Account ein:")
+    
+    with st.form("setup_admin_form"):
+        admin_name = st.text_input("Dein Name (z.B. Peter Schneider)")
+        admin_email = st.text_input("E-Mail-Adresse")
+        admin_pass = st.text_input("Sicheres Passwort", type="password")
+        submit_setup = st.form_submit_button("Initialen Admin-Account erstellen")
+        
+        if submit_setup:
+            if admin_name and admin_email and admin_pass:
+                success = create_initial_admin(admin_name, admin_email, admin_pass)
+                if success:
+                    st.success("Admin-Account erfolgreich erstellt! Die Seite lädt neu...")
+                    st.rerun()
+            else:
+                st.error("Bitte fülle alle Felder aus.")
+
+# FALL B: Benutzer vorhanden, aber nicht eingeloggt -> Login-Modus
+elif st.session_state['logged_in_user'] is None:
     with st.form("login_form"):
+        st.subheader("Login")
         email = st.text_input("E-Mail")
         password = st.text_input("Passwort", type="password")
+        
         if st.form_submit_button("Einloggen"):
             user = authenticate(email, password)
             if user:
@@ -128,13 +183,23 @@ if st.session_state['logged_in_user'] is None:
                 st.rerun()
             else:
                 st.error("Zugangsdaten ungültig.")
+
+# FALL C: Benutzer ist eingeloggt -> Dashboard anzeigen
 else:
     user = st.session_state['logged_in_user']
-    st.write(f"Willkommen zurück, {user['name']}!")
+    st.write(f"Willkommen zurück, **{user['name']}** ({user['rolle']})!")
+    
     if st.button("Ausloggen"):
         st.session_state['logged_in_user'] = None
         st.rerun()
 
-    # Beispiel für Datenanzeige
-    tasks = get_all_tasks()
-    st.dataframe(tasks)
+    # Admin-Bereich anzeigen, wenn die Rolle stimmt
+    if user['rolle'] == 'Admin':
+        st.markdown("---")
+        st.subheader("👥 Admin-Bereich: Benutzerverwaltung")
+        try:
+            with engine.connect() as conn:
+                df_users = pd.read_sql("SELECT user_id, name, email, rolle, dsgvo_akzeptiert FROM users", conn)
+            st.dataframe(df_users, use_container_width=True)
+        except Exception as e:
+            st.error(f"Fehler beim Laden der Benutzerliste: {e}")
