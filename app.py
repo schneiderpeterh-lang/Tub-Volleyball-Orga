@@ -4,18 +4,34 @@ import datetime
 import hashlib
 import secrets
 import traceback
-import socket
 from sqlalchemy import create_engine, text
 
-# 1. Konfiguration
+# ==========================================
+# 1. KONFIGURATION & DATENBANK-VERBINDUNG
+# ==========================================
 st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide")
 
-# ==========================================
-# DATENBANK-FUNKTIONEN
-# ==========================================
+# Verbindung aufbauen (Daten kommen sicher aus den Streamlit Secrets)
+try:
+    DB_URL = st.secrets["DB_URL"]
+    engine = create_engine(
+        DB_URL, 
+        connect_args={
+            "sslmode": "require",
+            "connect_timeout": 15
+        },
+        pool_pre_ping=True
+    )
+except Exception as e:
+    st.error(f"Datenbankfehler beim Verbindungsaufbau: {e}")
+    st.stop()
 
+
+# ==========================================
+# 2. DATENBANK-TABELLEN INITIALISIEREN
+# ==========================================
 def update_db_schema(engine):
-    """Initialisiert Tabellen in PostgreSQL."""
+    """Initialisiert alle notwendigen Tabellen in PostgreSQL, falls sie fehlen."""
     with engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS users (
@@ -48,81 +64,43 @@ def update_db_schema(engine):
             );
         """))
 
-# 2. Verbindung aufbauen
+# Schema beim Start einmal prüfen/anlegen
 try:
-    DB_URL = st.secrets["DB_URL"]
-    
-    # Erzwinge IPv4 Verbindung durch explizites Setzen der Adresse, falls der Resolver IPv6 liefert
-    # Wir nutzen hier den 'connect_args' Parameter um dem Adapter zu helfen
-    engine = create_engine(
-        DB_URL, 
-        connect_args={
-            "sslmode": "require",
-            "connect_timeout": 5,
-            "options": "-c inet6=false" # Versuch, IPv6 auf Treiberebene zu unterbinden
-        }
-    )
-    
-    # Test-Connection
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-        
-    # Erst jetzt schema initialisieren
     update_db_schema(engine)
 except Exception as e:
-    st.error(f"Datenbankfehler: {e}")
-    st.text(traceback.format_exc())
+    st.error(f"Fehler bei der Tabellen-Initialisierung: {e}")
     st.stop()
 
-# ==========================================
-# HILFSFUNKTIONEN (Passwort)
-# ==========================================
 
+# ==========================================
+# 3. KRYPTOGRAFIE & PASSWORT-SCHUTZ
+# ==========================================
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
     hash_obj = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
     return f"{salt}${hash_obj.hex()}"
 
 def verify_password(password: str, hashed_password: str) -> bool:
-    if "$" not in hashed_password: return password == hashed_password
+    if "$" not in hashed_password: 
+        return password == hashed_password
     salt, hash_hex = hashed_password.split('$')
     hash_obj = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
     return hash_obj.hex() == hash_hex
 
-# ==========================================
-# LOGIN & AUTHENTIFIZIERUNG
-# ==========================================
-
-def authenticate(email, password):
-    with engine.connect() as conn:
-        query = text("SELECT * FROM users WHERE email = :email")
-        result = conn.execute(query, {"email": email}).fetchone()
-        if result and verify_password(password, result.password_hash):
-            return dict(result._mapping)
-    return None
 
 # ==========================================
-# LOGIK-FUNKTIONEN
+# 4. USER-VERWALTUNG & SQL-AKTIONEN
 # ==========================================
-
-def get_all_tasks():
-    return pd.read_sql("SELECT * FROM tasks", engine)
-
-# ==========================================
-# BENUTZER-PRÜFUNG
-# ==========================================
-
 def get_user_count():
-    """Gibt die Anzahl der registrierten Benutzer zurück."""
+    """Prüft, ob bereits Benutzer in der Datenbank existieren."""
     try:
         with engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
-            return result
+            return conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
     except Exception:
         return 0
 
 def create_initial_admin(name, email, password):
-    """Erstellt den allerersten Administrator in der Datenbank."""
+    """Erstellt den allerersten Administrator beim allerersten Start."""
     hashed = hash_password(password)
     try:
         with engine.begin() as conn:
@@ -138,22 +116,57 @@ def create_initial_admin(name, email, password):
         st.error(f"Fehler beim Erstellen des Admins: {e}")
         return False
 
-# ==========================================
-# MAIN UI
-# ==========================================
+# NEUER BLOCK 1: Die Registrierungsfunktion für normale Nutzer
+def register_new_user(name, email, password, rolle):
+    """Registriert einen neuen Benutzer sicher in der PostgreSQL-Datenbank."""
+    hashed = hash_password(password)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert)
+                    VALUES (:name, :email, :hash, :rolle, 1)
+                """),
+                {"name": name, "email": email, "hash": hashed, "rolle": rolle}
+            )
+        return True, "Erfolgreich registriert! Du kannst dich nun im linken Tab einloggen."
+    except Exception as e:
+        # Prüfen auf doppelte E-Mail-Adresse
+        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+            return False, "Diese E-Mail-Adresse ist bereits registriert!"
+        return False, f"Fehler bei der Registrierung: {e}"
 
+def authenticate(email, password):
+    """Prüft E-Mail und Passwort beim Login."""
+    with engine.connect() as conn:
+        query = text("SELECT * FROM users WHERE email = :email")
+        result = conn.execute(query, {"email": email}).fetchone()
+        if result and verify_password(password, result.password_hash):
+            return dict(result._mapping)
+    return None
+
+def get_all_tasks():
+    """Lädt alle Aufgaben für das Haupt-Dashboard."""
+    try:
+        return pd.read_sql("SELECT * FROM tasks", engine)
+    except Exception:
+        return pd.DataFrame()
+
+
+# ==========================================
+# 5. BENUTZEROBERFLÄCHE (MAIN UI)
+# ==========================================
 st.title("🏐 TuB Helfer-Orga")
 
-# Session State initialisieren
+# Session-Status für Login initialisieren
 if 'logged_in_user' not in st.session_state:
     st.session_state['logged_in_user'] = None
 
 user_count = get_user_count()
 
-# FALL A: Noch keine Benutzer in der Datenbank -> Setup-Modus
+# FALL A: Datenbank ist komplett leer -> Erstmaligen Admin einrichten
 if user_count == 0:
     st.warning("⚠️ Keine Benutzer in der Datenbank gefunden. Bitte richte den ersten Admin-Account ein:")
-    
     with st.form("setup_admin_form"):
         admin_name = st.text_input("Dein Name (z.B. Peter Schneider)")
         admin_email = st.text_input("E-Mail-Adresse")
@@ -164,27 +177,57 @@ if user_count == 0:
             if admin_name and admin_email and admin_pass:
                 success = create_initial_admin(admin_name, admin_email, admin_pass)
                 if success:
-                    st.success("Admin-Account erfolgreich erstellt! Die Seite lädt neu...")
+                    st.success("Admin-Account erfolgreich erstellt! Bitte lade die Seite neu.")
                     st.rerun()
             else:
                 st.error("Bitte fülle alle Felder aus.")
 
-# FALL B: Benutzer vorhanden, aber nicht eingeloggt -> Login-Modus
+# FALL B: User sind vorhanden, aber niemand ist eingeloggt -> NEUER BLOCK 2: Login & Registrierung als Tabs
 elif st.session_state['logged_in_user'] is None:
-    with st.form("login_form"):
-        st.subheader("Login")
-        email = st.text_input("E-Mail")
-        password = st.text_input("Passwort", type="password")
-        
-        if st.form_submit_button("Einloggen"):
-            user = authenticate(email, password)
-            if user:
-                st.session_state['logged_in_user'] = user
-                st.rerun()
-            else:
-                st.error("Zugangsdaten ungültig.")
+    
+    # Trennung der Ansicht in zwei Reiter
+    tab_login, tab_register = st.tabs(["🔑 Einloggen", "📝 Neu Registrieren"])
+    
+    # ------------------- REITER 1: LOGIN -------------------
+    with tab_login:
+        with st.form("login_form"):
+            st.subheader("Willkommen zurück!")
+            email = st.text_input("E-Mail")
+            password = st.text_input("Passwort", type="password")
+            
+            if st.form_submit_button("Einloggen"):
+                user = authenticate(email, password)
+                if user:
+                    st.session_state['logged_in_user'] = user
+                    st.rerun()
+                else:
+                    st.error("Zugangsdaten ungültig oder Account existiert nicht.")
+                    
+    # ------------------- REITER 2: REGISTRIERUNG -------------------
+    with tab_register:
+        with st.form("register_form"):
+            st.subheader("Werde Teil der TuB Helfer-Crew!")
+            new_name = st.text_input("Vor- und Nachname")
+            new_email = st.text_input("E-Mail-Adresse")
+            new_password = st.text_input("Passwort", type="password")
+            
+            # Auswahl der Rolle (Admin fehlt hier absichtlich zur Sicherheit)
+            new_rolle = st.selectbox("Ich bin im Verein...", ["Spieler", "Trainer", "Elternteil"])
+            dsgvo = st.checkbox("Ich stimme der Verarbeitung meiner Daten für die Vereinsorganisation zu (DSGVO).")
+            
+            if st.form_submit_button("Kostenlos Registrieren"):
+                if not dsgvo:
+                    st.error("Du musst dem Datenschutz zustimmen, um die App nutzen zu können.")
+                elif not new_name or not new_email or not new_password:
+                    st.error("Bitte fülle alle Felder aus.")
+                else:
+                    success, msg = register_new_user(new_name, new_email, new_password, new_rolle)
+                    if success:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
 
-# FALL C: Benutzer ist eingeloggt -> Dashboard anzeigen
+# FALL C: Benutzer ist erfolgreich eingeloggt -> Dashboard & Adminbereich anzeigen
 else:
     user = st.session_state['logged_in_user']
     st.write(f"Willkommen zurück, **{user['name']}** ({user['rolle']})!")
@@ -193,9 +236,7 @@ else:
         st.session_state['logged_in_user'] = None
         st.rerun()
 
-    # ==========================================
-    # 1. DAS HAUPT-DASHBOARD (Für alle sichtbar)
-    # ==========================================
+    # --- Haupt-Dashboard (Für jeden eingeloggten User sichtbar) ---
     st.markdown("---")
     st.subheader("📋 Aktuelle Aufgaben & Schichten")
     try:
@@ -207,9 +248,7 @@ else:
     except Exception as e:
         st.error(f"Fehler beim Laden der Aufgaben: {e}")
 
-    # ==========================================
-    # 2. DER ADMIN-BEREICH (Nur für Admins)
-    # ==========================================
+    # --- Admin-Bereich (Nur für Admins sichtbar) ---
     if user['rolle'] == 'Admin':
         st.markdown("---")
         st.subheader("👥 Admin-Bereich: Benutzerverwaltung")
