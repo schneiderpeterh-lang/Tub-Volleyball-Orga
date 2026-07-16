@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import secrets
 import traceback
+import uuid
 from sqlalchemy import create_engine, text
 
 # ==========================================
@@ -33,6 +34,7 @@ except Exception as e:
 def update_db_schema(engine):
     """Initialisiert alle notwendigen Tabellen in PostgreSQL, falls sie fehlen."""
     with engine.begin() as conn:
+        # User Tabelle anlegen
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id SERIAL PRIMARY KEY,
@@ -42,6 +44,15 @@ def update_db_schema(engine):
                 rolle TEXT NOT NULL,
                 dsgvo_akzeptiert INTEGER DEFAULT 0
             );
+        """))
+        
+        # NEU: Spalte für Familienverknüpfung nachträglich hinzufügen (falls Tabelle schon existiert)
+        try:
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES users(user_id);"))
+        except Exception:
+            pass # Ignorieren, falls es in älteren Postgres-Versionen zu Fehlern führt
+            
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS teams (
                 team_id SERIAL PRIMARY KEY,
                 team_name TEXT NOT NULL
@@ -116,7 +127,6 @@ def create_initial_admin(name, email, password):
         st.error(f"Fehler beim Erstellen des Admins: {e}")
         return False
 
-# NEUER BLOCK 1: Die Registrierungsfunktion für normale Nutzer
 def register_new_user(name, email, password, rolle):
     """Registriert einen neuen Benutzer sicher in der PostgreSQL-Datenbank."""
     hashed = hash_password(password)
@@ -131,15 +141,45 @@ def register_new_user(name, email, password, rolle):
             )
         return True, "Erfolgreich registriert! Du kannst dich nun im linken Tab einloggen."
     except Exception as e:
-        # Prüfen auf doppelte E-Mail-Adresse
         if "unique" in str(e).lower() or "duplicate" in str(e).lower():
             return False, "Diese E-Mail-Adresse ist bereits registriert!"
         return False, f"Fehler bei der Registrierung: {e}"
 
+def add_child(parent_id, child_name):
+    """Fügt ein Kind hinzu, das mit dem Account des Elternteils verknüpft ist."""
+    # Generiere eine eindeutige "Dummy"-E-Mail-Adresse für die Datenbank
+    dummy_email = f"kind_{uuid.uuid4().hex[:8]}@tub.lokal"
+    dummy_pass = hash_password(secrets.token_hex(16)) # Zufälliges Passwort, da sich Kinder nicht einloggen
+    
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, parent_id)
+                    VALUES (:name, :email, :hash, 'Kind', 1, :parent_id)
+                """),
+                {"name": child_name, "email": dummy_email, "hash": dummy_pass, "parent_id": parent_id}
+            )
+        return True, f"{child_name} wurde erfolgreich als Familienmitglied hinzugefügt!"
+    except Exception as e:
+        return False, f"Fehler beim Hinzufügen: {e}"
+
+def get_children(parent_id):
+    """Lädt alle Kinder eines Benutzers."""
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(
+                text("SELECT user_id, name FROM users WHERE parent_id = :parent_id"), 
+                conn, 
+                params={"parent_id": parent_id}
+            )
+    except Exception:
+        return pd.DataFrame()
+
 def authenticate(email, password):
     """Prüft E-Mail und Passwort beim Login."""
     with engine.connect() as conn:
-        query = text("SELECT * FROM users WHERE email = :email")
+        query = text("SELECT * FROM users WHERE email = :email AND rolle != 'Kind'") # Kinder loggen sich nicht selbst ein
         result = conn.execute(query, {"email": email}).fetchone()
         if result and verify_password(password, result.password_hash):
             return dict(result._mapping)
@@ -182,7 +222,7 @@ if user_count == 0:
             else:
                 st.error("Bitte fülle alle Felder aus.")
 
-# FALL B: User sind vorhanden, aber niemand ist eingeloggt -> NEUER BLOCK 2: Login & Registrierung als Tabs
+# FALL B: User sind vorhanden, aber niemand ist eingeloggt
 elif st.session_state['logged_in_user'] is None:
     
     # Trennung der Ansicht in zwei Reiter
@@ -211,7 +251,6 @@ elif st.session_state['logged_in_user'] is None:
             new_email = st.text_input("E-Mail-Adresse")
             new_password = st.text_input("Passwort", type="password")
             
-            # Auswahl der Rolle (Admin fehlt hier absichtlich zur Sicherheit)
             new_rolle = st.selectbox("Ich bin im Verein...", ["Spieler", "Trainer", "Elternteil"])
             dsgvo = st.checkbox("Ich stimme der Verarbeitung meiner Daten für die Vereinsorganisation zu (DSGVO).")
             
@@ -235,6 +274,31 @@ else:
     if st.button("Ausloggen"):
         st.session_state['logged_in_user'] = None
         st.rerun()
+        
+    # --- Familien- und Kinderverwaltung ---
+    st.markdown("---")
+    st.subheader("👨‍👩‍👧 Meine Familie / Kinder")
+    st.write("Hier kannst du Familienmitglieder (z. B. Kinder ohne eigene Mailadresse) anlegen. Du kannst später stellvertretend für sie Vereinsaufgaben übernehmen.")
+    
+    # Bestehende Kinder anzeigen
+    children_df = get_children(user['user_id'])
+    if not children_df.empty:
+        st.table(children_df[['name']].rename(columns={'name': 'Name des Kindes'}))
+    
+    # Neues Kind hinzufügen
+    with st.expander("➕ Kind / Familienmitglied hinzufügen"):
+        with st.form("add_child_form"):
+            child_name = st.text_input("Vor- und Nachname des Kindes")
+            if st.form_submit_button("Speichern"):
+                if child_name:
+                    success, msg = add_child(user['user_id'], child_name)
+                    if success:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+                else:
+                    st.warning("Bitte gib einen Namen ein.")
 
     # --- Haupt-Dashboard (Für jeden eingeloggten User sichtbar) ---
     st.markdown("---")
@@ -254,7 +318,11 @@ else:
         st.subheader("👥 Admin-Bereich: Benutzerverwaltung")
         try:
             with engine.connect() as conn:
-                df_users = pd.read_sql("SELECT user_id, name, email, rolle, dsgvo_akzeptiert FROM users", conn)
-            st.dataframe(df_users, use_container_width=True)
+                # Wir laden hier alle User und zeigen auch die parent_id an, um Kinder zu erkennen
+                df_users = pd.read_sql("SELECT user_id, name, email, rolle, dsgvo_akzeptiert, parent_id FROM users", conn)
+            
+            # Formatierung für eine schönere Ansicht im Admin-Bereich
+            df_users['Typ'] = df_users['parent_id'].apply(lambda x: 'Kind / Sub-Account' if pd.notnull(x) else 'Haupt-Account')
+            st.dataframe(df_users[['user_id', 'name', 'email', 'rolle', 'Typ', 'dsgvo_akzeptiert']], use_container_width=True)
         except Exception as e:
             st.error(f"Fehler beim Laden der Benutzerliste: {e}")
