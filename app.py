@@ -94,6 +94,13 @@ def update_db_schema(engine):
                 tausch_angefragt INTEGER DEFAULT 0
             );
         """))
+        
+        # NEU: Start- und Endzeit für Tasks hinzufügen (falls nicht existent)
+        try:
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS start_zeit TEXT;"))
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ende_zeit TEXT;"))
+        except Exception:
+            pass
 
 # Schema beim Start einmal prüfen/anlegen
 try:
@@ -220,7 +227,7 @@ def get_all_tasks_with_assignees():
     """Lädt alle Aufgaben und verknüpft sie mit dem Namen der zugewiesenen Person."""
     try:
         query = text("""
-            SELECT t.task_id, t.kategorie, t.beschreibung, t.punkte_wert, t.zugewiesen_an, u.name as assignee_name
+            SELECT t.task_id, t.kategorie, t.beschreibung, t.punkte_wert, t.zugewiesen_an, t.start_zeit, t.ende_zeit, u.name as assignee_name
             FROM tasks t
             LEFT JOIN users u ON t.zugewiesen_an = u.user_id
             ORDER BY t.task_id DESC
@@ -230,16 +237,22 @@ def get_all_tasks_with_assignees():
     except Exception:
         return pd.DataFrame()
 
-def create_task(kategorie, beschreibung, punkte_wert):
+def create_task(kategorie, beschreibung, punkte_wert, start_zeit=None, ende_zeit=None):
     """Erstellt eine neue Aufgabe in der Datenbank."""
     try:
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO tasks (kategorie, beschreibung, punkte_wert)
-                    VALUES (:kat, :besch, :pkt)
+                    INSERT INTO tasks (kategorie, beschreibung, punkte_wert, start_zeit, ende_zeit)
+                    VALUES (:kat, :besch, :pkt, :start, :ende)
                 """),
-                {"kat": kategorie, "besch": beschreibung, "pkt": punkte_wert}
+                {
+                    "kat": kategorie, 
+                    "besch": beschreibung, 
+                    "pkt": punkte_wert,
+                    "start": start_zeit,
+                    "ende": ende_zeit
+                }
             )
         return True, "Aufgabe erfolgreich angelegt!"
     except Exception as e:
@@ -400,9 +413,28 @@ else:
                 beschreibung_input = st.text_area("Beschreibung / Details")
                 punkte_input = st.number_input("Punkte-Wert", min_value=1, value=1)
                 
+                # Datum- und Zeit-Auswahl
+                col1, col2 = st.columns(2)
+                with col1:
+                    start_date = st.date_input("Startdatum", value=datetime.date.today())
+                    start_time = st.time_input("Startzeit", value=datetime.time(10, 0))
+                with col2:
+                    end_date = st.date_input("Enddatum", value=datetime.date.today())
+                    end_time = st.time_input("Endzeit", value=datetime.time(12, 0))
+                
                 if st.form_submit_button("Aufgabe speichern"):
                     if kategorie_input and beschreibung_input:
-                        success, msg = create_task(kategorie_input, beschreibung_input, punkte_input)
+                        # Datum und Zeit schön als String formatieren
+                        start_dt_str = f"{start_date.strftime('%d.%m.%Y')} {start_time.strftime('%H:%M')} Uhr"
+                        end_dt_str = f"{end_date.strftime('%d.%m.%Y')} {end_time.strftime('%H:%M')} Uhr"
+                        
+                        success, msg = create_task(
+                            kategorie=kategorie_input, 
+                            beschreibung=beschreibung_input, 
+                            punkte_wert=punkte_input,
+                            start_zeit=start_dt_str,
+                            ende_zeit=end_dt_str
+                        )
                         if success:
                             st.success(msg)
                             st.rerun()
@@ -424,6 +456,9 @@ else:
                     
                     with col1:
                         st.write(f"**{row['kategorie']}**")
+                        # Wenn Zeiten vorhanden sind, zeige sie mit einem Icon an
+                        if pd.notna(row.get('start_zeit')) and pd.notna(row.get('ende_zeit')):
+                            st.write(f"🗓️ **{row['start_zeit']}** bis **{row['ende_zeit']}**")
                         st.caption(row['beschreibung'])
                     
                     with col2:
