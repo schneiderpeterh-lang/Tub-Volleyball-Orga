@@ -66,9 +66,10 @@ def update_db_schema(engine):
             );
         """))
         
-        # Spalte für Familienverknüpfung nachträglich hinzufügen (falls Tabelle schon existiert)
+        # Spalten für Familienverknüpfung und Teams nachträglich hinzufügen (falls Tabelle schon existiert)
         try:
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES users(user_id);"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS team TEXT;"))
         except Exception:
             pass 
             
@@ -99,6 +100,7 @@ def update_db_schema(engine):
         try:
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS start_zeit TEXT;"))
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ende_zeit TEXT;"))
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS betroffene_teams TEXT;"))
         except Exception:
             pass
 
@@ -144,8 +146,8 @@ def create_initial_admin(name, email, password):
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert)
-                    VALUES (:name, :email, :hash, 'Admin', 1)
+                    INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team)
+                    VALUES (:name, :email, :hash, 'Admin', 1, 'Kein Team')
                 """),
                 {"name": name, "email": email, "hash": hashed}
             )
@@ -154,17 +156,18 @@ def create_initial_admin(name, email, password):
         st.error(f"Fehler beim Erstellen des Admins: {e}")
         return False
 
-def register_new_user(name, email, password, rolle):
+def register_new_user(name, email, password, rolle, team_list):
     """Registriert einen neuen Benutzer sicher in der PostgreSQL-Datenbank."""
     hashed = hash_password(password)
+    team_str = ", ".join(team_list) if team_list else "Kein Team"
     try:
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert)
-                    VALUES (:name, :email, :hash, :rolle, 1)
+                    INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team)
+                    VALUES (:name, :email, :hash, :rolle, 1, :team)
                 """),
-                {"name": name, "email": email, "hash": hashed, "rolle": rolle}
+                {"name": name, "email": email, "hash": hashed, "rolle": rolle, "team": team_str}
             )
         return True, "Erfolgreich registriert! Du kannst dich nun im linken Tab einloggen."
     except Exception as e:
@@ -172,19 +175,20 @@ def register_new_user(name, email, password, rolle):
             return False, "Diese E-Mail-Adresse ist bereits registriert!"
         return False, f"Fehler bei der Registrierung: {e}"
 
-def add_child(parent_id, child_name):
+def add_child(parent_id, child_name, child_team_list):
     """Fügt ein Kind hinzu, das mit dem Account des Elternteils verknüpft ist."""
     dummy_email = f"kind_{uuid.uuid4().hex[:8]}@tub.lokal"
     dummy_pass = hash_password(secrets.token_hex(16)) 
+    team_str = ", ".join(child_team_list) if child_team_list else "Kein Team"
     
     try:
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, parent_id)
-                    VALUES (:name, :email, :hash, 'Kind', 1, :parent_id)
+                    INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, parent_id, team)
+                    VALUES (:name, :email, :hash, 'Kind', 1, :parent_id, :team)
                 """),
-                {"name": child_name, "email": dummy_email, "hash": dummy_pass, "parent_id": parent_id}
+                {"name": child_name, "email": dummy_email, "hash": dummy_pass, "parent_id": parent_id, "team": team_str}
             )
         return True, f"{child_name} wurde erfolgreich als Familienmitglied hinzugefügt!"
     except Exception as e:
@@ -195,7 +199,7 @@ def get_children(parent_id):
     try:
         with engine.connect() as conn:
             return pd.read_sql(
-                text("SELECT user_id, name FROM users WHERE parent_id = :parent_id"), 
+                text("SELECT user_id, name, team FROM users WHERE parent_id = :parent_id"), 
                 conn, 
                 params={"parent_id": parent_id}
             )
@@ -227,7 +231,7 @@ def get_all_tasks_with_assignees():
     """Lädt alle Aufgaben und verknüpft sie mit dem Namen der zugewiesenen Person."""
     try:
         query = text("""
-            SELECT t.task_id, t.kategorie, t.beschreibung, t.punkte_wert, t.zugewiesen_an, t.start_zeit, t.ende_zeit, u.name as assignee_name
+            SELECT t.task_id, t.kategorie, t.beschreibung, t.punkte_wert, t.zugewiesen_an, t.start_zeit, t.ende_zeit, t.betroffene_teams, u.name as assignee_name
             FROM tasks t
             LEFT JOIN users u ON t.zugewiesen_an = u.user_id
             ORDER BY t.task_id DESC
@@ -237,21 +241,22 @@ def get_all_tasks_with_assignees():
     except Exception:
         return pd.DataFrame()
 
-def create_task(kategorie, beschreibung, punkte_wert, start_zeit=None, ende_zeit=None):
+def create_task(kategorie, beschreibung, punkte_wert, start_zeit=None, ende_zeit=None, betroffene_teams=None):
     """Erstellt eine neue Aufgabe in der Datenbank."""
     try:
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO tasks (kategorie, beschreibung, punkte_wert, start_zeit, ende_zeit)
-                    VALUES (:kat, :besch, :pkt, :start, :ende)
+                    INSERT INTO tasks (kategorie, beschreibung, punkte_wert, start_zeit, ende_zeit, betroffene_teams)
+                    VALUES (:kat, :besch, :pkt, :start, :ende, :teams)
                 """),
                 {
                     "kat": kategorie, 
                     "besch": beschreibung, 
                     "pkt": punkte_wert,
                     "start": start_zeit,
-                    "ende": ende_zeit
+                    "ende": ende_zeit,
+                    "teams": betroffene_teams
                 }
             )
         return True, "Aufgabe erfolgreich angelegt!"
@@ -275,6 +280,9 @@ def accept_task(task_id, user_id):
 # 5. BENUTZEROBERFLÄCHE (MAIN UI)
 # ==========================================
 st.title("🏐 TuB Helfer-Orga")
+
+# Globale Liste der Teams zur Wiederverwendung
+TEAM_LISTE = ["U12", "U13", "U14", "U16", "U18", "U20", "Herren 1", "Herren 2", "Herren 3", "Herren 4"]
 
 # Session-Status für Login initialisieren ODER Cookie auslesen
 if 'logged_in_user' not in st.session_state:
@@ -345,8 +353,14 @@ elif st.session_state['logged_in_user'] is None:
             new_email = st.text_input("E-Mail-Adresse")
             new_password = st.text_input("Passwort", type="password")
             
-            # Neue Rolle 'Organisator' hinzugefügt
-            new_rolle = st.selectbox("Ich bin im Verein...", ["Spieler", "Trainer", "Elternteil", "Organisator"])
+            col1, col2 = st.columns(2)
+            with col1:
+                # Neue Rolle 'Organisator' hinzugefügt
+                new_rolle = st.selectbox("Ich bin im Verein...", ["Spieler", "Trainer", "Elternteil", "Organisator"])
+            with col2:
+                # Team-Zuweisung bei Registrierung (Mehrfachauswahl)
+                new_team = st.multiselect("Mein(e) Team(s) / Mannschaft(en)", TEAM_LISTE)
+                
             dsgvo = st.checkbox("Ich stimme der Verarbeitung meiner Daten für die Vereinsorganisation zu (DSGVO).")
             
             if st.form_submit_button("Kostenlos Registrieren"):
@@ -355,7 +369,7 @@ elif st.session_state['logged_in_user'] is None:
                 elif not new_name or not new_email or not new_password:
                     st.error("Bitte fülle alle Felder aus.")
                 else:
-                    success, msg = register_new_user(new_name, new_email, new_password, new_rolle)
+                    success, msg = register_new_user(new_name, new_email, new_password, new_rolle, new_team)
                     if success:
                         st.success(msg)
                     else:
@@ -364,7 +378,8 @@ elif st.session_state['logged_in_user'] is None:
 # FALL C: Benutzer ist erfolgreich eingeloggt -> Dashboard & Adminbereich anzeigen
 else:
     user = st.session_state['logged_in_user']
-    st.write(f"Willkommen zurück, **{user['name']}** ({user['rolle']})!")
+    user_team_display = f" ({user['team']})" if user.get('team') and user.get('team') != "Kein Team" else ""
+    st.write(f"Willkommen zurück, **{user['name']}** - {user['rolle']}{user_team_display}!")
     
     if st.button("Ausloggen"):
         # Ausloggen bedeutet: Cookie löschen UND Session leeren
@@ -385,14 +400,19 @@ else:
     with st.expander("Verwaltung öffnen"):
         st.write("Hier kannst du Familienmitglieder (z. B. Kinder ohne eigene Mailadresse) anlegen. Du kannst später stellvertretend für sie Vereinsaufgaben übernehmen.")
         if not children_df.empty:
-            st.table(children_df[['name']].rename(columns={'name': 'Name des Kindes'}))
+            st.table(children_df[['name', 'team']].rename(columns={'name': 'Name des Kindes', 'team': 'Mannschaft'}))
         
         # Neues Kind hinzufügen
         with st.form("add_child_form"):
-            child_name = st.text_input("Vor- und Nachname des Kindes")
+            col1, col2 = st.columns(2)
+            with col1:
+                child_name = st.text_input("Vor- und Nachname des Kindes")
+            with col2:
+                child_team = st.multiselect("Mannschaft(en) des Kindes", TEAM_LISTE)
+                
             if st.form_submit_button("Familienmitglied speichern"):
                 if child_name:
-                    success, msg = add_child(user['user_id'], child_name)
+                    success, msg = add_child(user['user_id'], child_name, child_team)
                     if success:
                         st.success(msg)
                         st.rerun()
@@ -400,6 +420,68 @@ else:
                         st.error(msg)
                 else:
                     st.warning("Bitte gib einen Namen ein.")
+
+    # --- ZENTRALER DATENABRUF ---
+    try:
+        tasks_df = get_all_tasks_with_assignees()
+    except Exception:
+        tasks_df = pd.DataFrame()
+
+    # --- 📅 Mein Team-Kalender ---
+    st.markdown("---")
+    st.subheader("📅 Mein Team-Kalender")
+    st.write("Hier siehst du übersichtlich alle anstehenden Termine, die für deine Mannschaften (und die deiner Kinder) relevant sind.")
+    
+    if not tasks_df.empty:
+        # Sammle alle Teams des Users und seiner Kinder in einem Set (vermeidet Duplikate)
+        my_teams = set()
+        if user.get('team') and user['team'] != "Kein Team":
+            my_teams.update([t.strip() for t in user['team'].split(',')])
+            
+        if not children_df.empty:
+            for _, child in children_df.iterrows():
+                if child.get('team') and child['team'] != "Kein Team":
+                    my_teams.update([t.strip() for t in child['team'].split(',')])
+                    
+        # Hilfsfunktion zum Filtern der Termine
+        def is_my_team(task_teams_str):
+            if pd.isna(task_teams_str) or not task_teams_str:
+                return False
+            task_teams = [t.strip() for t in task_teams_str.split(',')]
+            return any(team in my_teams for team in task_teams)
+            
+        # Filtern der Tabelle
+        cal_df = tasks_df[tasks_df['betroffene_teams'].apply(is_my_team)].copy()
+        
+        if not cal_df.empty:
+            # Versuch einer chronologischen Sortierung anhand des Datumsstrings
+            try:
+                cal_df['sort_date'] = pd.to_datetime(cal_df['start_zeit'].str.replace(' Uhr', ''), format='%d.%m.%Y %H:%M', errors='coerce')
+                cal_df = cal_df.sort_values(by='sort_date')
+            except:
+                pass # Falls das Parsen fehlschlägt, behalte die Ursprungssortierung
+                
+            # Tabelle anzeigen (Index ausblenden für sauberen Look)
+            st.dataframe(
+                cal_df[['start_zeit', 'ende_zeit', 'kategorie', 'beschreibung', 'betroffene_teams']].rename(
+                    columns={
+                        'start_zeit': 'Start', 
+                        'ende_zeit': 'Ende', 
+                        'kategorie': 'Kategorie', 
+                        'beschreibung': 'Beschreibung', 
+                        'betroffene_teams': 'Teams'
+                    }
+                ), 
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            if my_teams:
+                st.info(f"Für deine zugewiesenen Teams ({', '.join(my_teams)}) stehen aktuell keine spezifischen Termine an.")
+            else:
+                st.info("Dir sind aktuell keine Teams zugewiesen. Bearbeite dein Profil oder lege Kinder an, um hier Termine zu sehen.")
+    else:
+        st.info("Es sind noch keine Aufgaben oder Termine im System angelegt.")
 
     # --- Haupt-Dashboard: AUFGABEN ---
     st.markdown("---")
@@ -422,18 +504,23 @@ else:
                     end_date = st.date_input("Enddatum", value=datetime.date.today())
                     end_time = st.time_input("Endzeit", value=datetime.time(12, 0))
                 
+                # Neues Feld für betroffene Teams
+                task_teams = st.multiselect("Betroffene Teams (optional)", TEAM_LISTE)
+                
                 if st.form_submit_button("Aufgabe speichern"):
                     if kategorie_input and beschreibung_input:
                         # Datum und Zeit schön als String formatieren
                         start_dt_str = f"{start_date.strftime('%d.%m.%Y')} {start_time.strftime('%H:%M')} Uhr"
                         end_dt_str = f"{end_date.strftime('%d.%m.%Y')} {end_time.strftime('%H:%M')} Uhr"
+                        teams_str = ", ".join(task_teams) if task_teams else None
                         
                         success, msg = create_task(
                             kategorie=kategorie_input, 
                             beschreibung=beschreibung_input, 
                             punkte_wert=punkte_input,
                             start_zeit=start_dt_str,
-                            ende_zeit=end_dt_str
+                            ende_zeit=end_dt_str,
+                            betroffene_teams=teams_str
                         )
                         if success:
                             st.success(msg)
@@ -446,57 +533,55 @@ else:
     st.write("") # Etwas Abstand
     
     # 2. Aufgaben auflisten & annehmen (Für alle)
-    try:
-        tasks_df = get_all_tasks_with_assignees()
-        
-        if not tasks_df.empty:
-            for _, row in tasks_df.iterrows():
-                with st.container():
-                    col1, col2, col3 = st.columns([4, 1, 3])
-                    
-                    with col1:
-                        st.write(f"**{row['kategorie']}**")
-                        # Wenn Zeiten vorhanden sind, zeige sie mit einem Icon an
-                        if pd.notna(row.get('start_zeit')) and pd.notna(row.get('ende_zeit')):
-                            st.write(f"🗓️ **{row['start_zeit']}** bis **{row['ende_zeit']}**")
-                        st.caption(row['beschreibung'])
-                    
-                    with col2:
-                        st.write(f"Punkte: **{row['punkte_wert']}**")
-                    
-                    with col3:
-                        if pd.isna(row['zugewiesen_an']):
-                            # Aufgabe ist noch frei
-                            # Dropdown zur Auswahl: Ich selbst oder eines meiner Kinder
-                            options = {user['user_id']: "Ich selbst"}
-                            if not children_df.empty:
-                                for _, child in children_df.iterrows():
-                                    options[child['user_id']] = f"Kind: {child['name']}"
-                                    
-                            selected_user_id = st.selectbox(
-                                "Wer übernimmt?", 
-                                options=list(options.keys()), 
-                                format_func=lambda x: options[x],
-                                key=f"sel_{row['task_id']}",
-                                label_visibility="collapsed"
-                            )
-                            
-                            if st.button("Übernehmen", key=f"btn_{row['task_id']}", use_container_width=True):
-                                success, msg = accept_task(row['task_id'], selected_user_id)
-                                if success:
-                                    st.success(msg)
-                                    st.rerun()
-                                else:
-                                    st.error(msg)
-                        else:
-                            # Aufgabe ist vergeben
-                            st.success(f"✅ Angenommen von:\n**{row['assignee_name']}**")
-                            
-                    st.divider() # Trennlinie zwischen den Aufgaben
-        else:
-            st.info("Es sind aktuell keine Aufgaben eingetragen.")
-    except Exception as e:
-        st.error(f"Fehler beim Laden der Aufgaben: {e}")
+    if not tasks_df.empty:
+        for _, row in tasks_df.iterrows():
+            with st.container():
+                col1, col2, col3 = st.columns([4, 1, 3])
+                
+                with col1:
+                    st.write(f"**{row['kategorie']}**")
+                    # Wenn Zeiten vorhanden sind, zeige sie mit einem Icon an
+                    if pd.notna(row.get('start_zeit')) and pd.notna(row.get('ende_zeit')):
+                        st.write(f"🗓️ **{row['start_zeit']}** bis **{row['ende_zeit']}**")
+                    # Wenn Teams zugewiesen sind
+                    if pd.notna(row.get('betroffene_teams')) and row['betroffene_teams']:
+                        st.write(f"👕 **Teams:** {row['betroffene_teams']}")
+                    st.caption(row['beschreibung'])
+                
+                with col2:
+                    st.write(f"Punkte: **{row['punkte_wert']}**")
+                
+                with col3:
+                    if pd.isna(row['zugewiesen_an']):
+                        # Aufgabe ist noch frei
+                        # Dropdown zur Auswahl: Ich selbst oder eines meiner Kinder
+                        options = {user['user_id']: "Ich selbst"}
+                        if not children_df.empty:
+                            for _, child in children_df.iterrows():
+                                options[child['user_id']] = f"Kind: {child['name']}"
+                                
+                        selected_user_id = st.selectbox(
+                            "Wer übernimmt?", 
+                            options=list(options.keys()), 
+                            format_func=lambda x: options[x],
+                            key=f"sel_{row['task_id']}",
+                            label_visibility="collapsed"
+                        )
+                        
+                        if st.button("Übernehmen", key=f"btn_{row['task_id']}", use_container_width=True):
+                            success, msg = accept_task(row['task_id'], selected_user_id)
+                            if success:
+                                st.success(msg)
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                    else:
+                        # Aufgabe ist vergeben
+                        st.success(f"✅ Angenommen von:\n**{row['assignee_name']}**")
+                        
+                st.divider() # Trennlinie zwischen den Aufgaben
+    else:
+        st.info("Es sind aktuell keine Aufgaben eingetragen.")
 
     # --- Admin-Bereich (Nur für Admins sichtbar) ---
     if user['rolle'] == 'Admin':
@@ -504,9 +589,10 @@ else:
         st.subheader("👥 Admin-Bereich: Benutzerverwaltung")
         try:
             with engine.connect() as conn:
-                df_users = pd.read_sql("SELECT user_id, name, email, rolle, dsgvo_akzeptiert, parent_id FROM users", conn)
+                # Hole alle User inkl. dem neuen 'team' Feld
+                df_users = pd.read_sql("SELECT user_id, name, email, rolle, team, dsgvo_akzeptiert, parent_id FROM users", conn)
             
             df_users['Typ'] = df_users['parent_id'].apply(lambda x: 'Kind / Sub-Account' if pd.notnull(x) else 'Haupt-Account')
-            st.dataframe(df_users[['user_id', 'name', 'email', 'rolle', 'Typ', 'dsgvo_akzeptiert']], use_container_width=True)
+            st.dataframe(df_users[['user_id', 'name', 'email', 'rolle', 'team', 'Typ', 'dsgvo_akzeptiert']], use_container_width=True)
         except Exception as e:
             st.error(f"Fehler beim Laden der Benutzerliste: {e}")
