@@ -193,7 +193,23 @@ else:
         st.session_state['logged_in_user'] = None
         st.rerun()
 
-    # Admin-Bereich anzeigen, wenn die Rolle stimmt
+    # ==========================================
+    # 1. DAS HAUPT-DASHBOARD (Für alle sichtbar)
+    # ==========================================
+    st.markdown("---")
+    st.subheader("📋 Aktuelle Aufgaben & Schichten")
+    try:
+        tasks = get_all_tasks()
+        if not tasks.empty:
+            st.dataframe(tasks, use_container_width=True)
+        else:
+            st.info("Es sind aktuell keine Aufgaben eingetragen.")
+    except Exception as e:
+        st.error(f"Fehler beim Laden der Aufgaben: {e}")
+
+    # ==========================================
+    # 2. DER ADMIN-BEREICH (Nur für Admins)
+    # ==========================================
     if user['rolle'] == 'Admin':
         st.markdown("---")
         st.subheader("👥 Admin-Bereich: Benutzerverwaltung")
