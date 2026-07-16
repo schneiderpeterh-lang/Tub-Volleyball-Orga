@@ -216,12 +216,46 @@ def get_user_by_id(user_id):
         pass
     return None
 
-def get_all_tasks():
-    """Lädt alle Aufgaben für das Haupt-Dashboard."""
+def get_all_tasks_with_assignees():
+    """Lädt alle Aufgaben und verknüpft sie mit dem Namen der zugewiesenen Person."""
     try:
-        return pd.read_sql("SELECT * FROM tasks", engine)
+        query = text("""
+            SELECT t.task_id, t.kategorie, t.beschreibung, t.punkte_wert, t.zugewiesen_an, u.name as assignee_name
+            FROM tasks t
+            LEFT JOIN users u ON t.zugewiesen_an = u.user_id
+            ORDER BY t.task_id DESC
+        """)
+        with engine.connect() as conn:
+            return pd.read_sql(query, conn)
     except Exception:
         return pd.DataFrame()
+
+def create_task(kategorie, beschreibung, punkte_wert):
+    """Erstellt eine neue Aufgabe in der Datenbank."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO tasks (kategorie, beschreibung, punkte_wert)
+                    VALUES (:kat, :besch, :pkt)
+                """),
+                {"kat": kategorie, "besch": beschreibung, "pkt": punkte_wert}
+            )
+        return True, "Aufgabe erfolgreich angelegt!"
+    except Exception as e:
+        return False, f"Fehler beim Erstellen der Aufgabe: {e}"
+
+def accept_task(task_id, user_id):
+    """Weist eine Aufgabe einem Benutzer (oder Kind) zu."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE tasks SET zugewiesen_an = :user_id WHERE task_id = :task_id"),
+                {"user_id": user_id, "task_id": task_id}
+            )
+        return True, "Aufgabe erfolgreich übernommen!"
+    except Exception as e:
+        return False, f"Fehler bei der Übernahme: {e}"
 
 
 # ==========================================
@@ -249,7 +283,7 @@ user_count = get_user_count()
 if user_count == 0:
     st.warning("⚠️ Keine Benutzer in der Datenbank gefunden. Bitte richte den ersten Admin-Account ein:")
     with st.form("setup_admin_form"):
-        admin_name = st.text_input("Dein Name (z.B. Peter Schneider)")
+        admin_name = st.text_input("Dein Name (z.B. Max Mustermann)")
         admin_email = st.text_input("E-Mail-Adresse")
         admin_pass = st.text_input("Sicheres Passwort", type="password")
         submit_setup = st.form_submit_button("Initialen Admin-Account erstellen")
@@ -298,7 +332,8 @@ elif st.session_state['logged_in_user'] is None:
             new_email = st.text_input("E-Mail-Adresse")
             new_password = st.text_input("Passwort", type="password")
             
-            new_rolle = st.selectbox("Ich bin im Verein...", ["Spieler", "Trainer", "Elternteil"])
+            # Neue Rolle 'Organisator' hinzugefügt
+            new_rolle = st.selectbox("Ich bin im Verein...", ["Spieler", "Trainer", "Elternteil", "Organisator"])
             dsgvo = st.checkbox("Ich stimme der Verarbeitung meiner Daten für die Vereinsorganisation zu (DSGVO).")
             
             if st.form_submit_button("Kostenlos Registrieren"):
@@ -330,18 +365,19 @@ else:
     # --- Familien- und Kinderverwaltung ---
     st.markdown("---")
     st.subheader("👨‍👩‍👧 Meine Familie / Kinder")
-    st.write("Hier kannst du Familienmitglieder (z. B. Kinder ohne eigene Mailadresse) anlegen. Du kannst später stellvertretend für sie Vereinsaufgaben übernehmen.")
     
-    # Bestehende Kinder anzeigen
+    # Bestehende Kinder abrufen
     children_df = get_children(user['user_id'])
-    if not children_df.empty:
-        st.table(children_df[['name']].rename(columns={'name': 'Name des Kindes'}))
     
-    # Neues Kind hinzufügen
-    with st.expander("➕ Kind / Familienmitglied hinzufügen"):
+    with st.expander("Verwaltung öffnen"):
+        st.write("Hier kannst du Familienmitglieder (z. B. Kinder ohne eigene Mailadresse) anlegen. Du kannst später stellvertretend für sie Vereinsaufgaben übernehmen.")
+        if not children_df.empty:
+            st.table(children_df[['name']].rename(columns={'name': 'Name des Kindes'}))
+        
+        # Neues Kind hinzufügen
         with st.form("add_child_form"):
             child_name = st.text_input("Vor- und Nachname des Kindes")
-            if st.form_submit_button("Speichern"):
+            if st.form_submit_button("Familienmitglied speichern"):
                 if child_name:
                     success, msg = add_child(user['user_id'], child_name)
                     if success:
@@ -352,13 +388,76 @@ else:
                 else:
                     st.warning("Bitte gib einen Namen ein.")
 
-    # --- Haupt-Dashboard (Für jeden eingeloggten User sichtbar) ---
+    # --- Haupt-Dashboard: AUFGABEN ---
     st.markdown("---")
     st.subheader("📋 Aktuelle Aufgaben & Schichten")
+    
+    # 1. Aufgaben erstellen (Nur für Admins & Organisatoren)
+    if user['rolle'] in ['Admin', 'Organisator']:
+        with st.expander("➕ Neue Aufgabe anlegen"):
+            with st.form("new_task_form"):
+                kategorie_input = st.text_input("Kategorie (z.B. Hallenaufbau, Catering, Schiedsgericht)")
+                beschreibung_input = st.text_area("Beschreibung / Details")
+                punkte_input = st.number_input("Punkte-Wert", min_value=1, value=1)
+                
+                if st.form_submit_button("Aufgabe speichern"):
+                    if kategorie_input and beschreibung_input:
+                        success, msg = create_task(kategorie_input, beschreibung_input, punkte_input)
+                        if success:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                    else:
+                        st.error("Bitte Kategorie und Beschreibung ausfüllen.")
+                        
+    st.write("") # Etwas Abstand
+    
+    # 2. Aufgaben auflisten & annehmen (Für alle)
     try:
-        tasks = get_all_tasks()
-        if not tasks.empty:
-            st.dataframe(tasks, use_container_width=True)
+        tasks_df = get_all_tasks_with_assignees()
+        
+        if not tasks_df.empty:
+            for _, row in tasks_df.iterrows():
+                with st.container():
+                    col1, col2, col3 = st.columns([4, 1, 3])
+                    
+                    with col1:
+                        st.write(f"**{row['kategorie']}**")
+                        st.caption(row['beschreibung'])
+                    
+                    with col2:
+                        st.write(f"Punkte: **{row['punkte_wert']}**")
+                    
+                    with col3:
+                        if pd.isna(row['zugewiesen_an']):
+                            # Aufgabe ist noch frei
+                            # Dropdown zur Auswahl: Ich selbst oder eines meiner Kinder
+                            options = {user['user_id']: "Ich selbst"}
+                            if not children_df.empty:
+                                for _, child in children_df.iterrows():
+                                    options[child['user_id']] = f"Kind: {child['name']}"
+                                    
+                            selected_user_id = st.selectbox(
+                                "Wer übernimmt?", 
+                                options=list(options.keys()), 
+                                format_func=lambda x: options[x],
+                                key=f"sel_{row['task_id']}",
+                                label_visibility="collapsed"
+                            )
+                            
+                            if st.button("Übernehmen", key=f"btn_{row['task_id']}", use_container_width=True):
+                                success, msg = accept_task(row['task_id'], selected_user_id)
+                                if success:
+                                    st.success(msg)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                        else:
+                            # Aufgabe ist vergeben
+                            st.success(f"✅ Angenommen von:\n**{row['assignee_name']}**")
+                            
+                    st.divider() # Trennlinie zwischen den Aufgaben
         else:
             st.info("Es sind aktuell keine Aufgaben eingetragen.")
     except Exception as e:
