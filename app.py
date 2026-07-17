@@ -462,17 +462,190 @@ else:
             
         st.session_state['logged_in_user'] = None
         st.rerun()
-        
-    # --- Familien- und Kinderverwaltung ---
-    st.markdown("---")
-    st.subheader("👨‍👩‍👧 Meine Familie / Kinder")
-    
-    # Bestehende Kinder abrufen
+
+    # --- ZENTRALER DATENABRUF (für alle Tabs benötigt) ---
     children_df = get_children(user['user_id'])
+    try:
+        tasks_df = get_all_tasks_with_assignees()
+    except Exception:
+        tasks_df = pd.DataFrame()
+
+    # --- TABS INITIALISIEREN ---
+    tab_names = ["📋 Aufgaben & Schichten", "📅 Mein Kalender", "👨‍👩‍👧 Meine Familie"]
+    if user['rolle'] == 'Admin':
+        tab_names.append("👥 Admin-Bereich")
+        
+    tabs = st.tabs(tab_names)
     
-    with st.expander("Verwaltung öffnen"):
+    # ==========================================
+    # TAB 1: AUFGABEN
+    # ==========================================
+    with tabs[0]:
+        st.subheader("Aktuelle Aufgaben & Schichten")
+        
+        # 1. Aufgaben erstellen (Nur für Admins & Organisatoren)
+        if user['rolle'] in ['Admin', 'Organisator']:
+            with st.expander("➕ Neue Aufgabe anlegen"):
+                with st.form("new_task_form"):
+                    kategorie_input = st.text_input("Kategorie (z.B. Hallenaufbau, Catering, Schiedsgericht)")
+                    beschreibung_input = st.text_area("Beschreibung / Details")
+                    punkte_input = st.number_input("Punkte-Wert", min_value=1, value=1)
+                    
+                    # Datum- und Zeit-Auswahl
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        start_date = st.date_input("Startdatum", value=datetime.date.today())
+                        start_time = st.time_input("Startzeit", value=datetime.time(10, 0))
+                    with col2:
+                        end_date = st.date_input("Enddatum", value=datetime.date.today())
+                        end_time = st.time_input("Endzeit", value=datetime.time(12, 0))
+                    
+                    # Neues Feld für betroffene Teams
+                    task_teams = st.multiselect("Betroffene Teams (optional)", TEAM_LISTE)
+                    
+                    if st.form_submit_button("Aufgabe speichern"):
+                        if kategorie_input and beschreibung_input:
+                            # Datum und Zeit schön als String formatieren
+                            start_dt_str = f"{start_date.strftime('%d.%m.%Y')} {start_time.strftime('%H:%M')} Uhr"
+                            end_dt_str = f"{end_date.strftime('%d.%m.%Y')} {end_time.strftime('%H:%M')} Uhr"
+                            teams_str = ", ".join(task_teams) if task_teams else None
+                            
+                            success, msg = create_task(
+                                kategorie=kategorie_input, 
+                                beschreibung=beschreibung_input, 
+                                punkte_wert=punkte_input,
+                                start_zeit=start_dt_str,
+                                ende_zeit=end_dt_str,
+                                betroffene_teams=teams_str
+                            )
+                            if success:
+                                st.success(msg)
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                        else:
+                            st.error("Bitte Kategorie und Beschreibung ausfüllen.")
+                            
+        st.write("") # Etwas Abstand
+        
+        # 2. Aufgaben auflisten & annehmen (Für alle)
+        if not tasks_df.empty:
+            for _, row in tasks_df.iterrows():
+                with st.container():
+                    col1, col2, col3 = st.columns([4, 1, 3])
+                    
+                    with col1:
+                        st.write(f"**{row['kategorie']}**")
+                        # Wenn Zeiten vorhanden sind, zeige sie mit einem Icon an
+                        if pd.notna(row.get('start_zeit')) and pd.notna(row.get('ende_zeit')):
+                            st.write(f"🗓️ **{row['start_zeit']}** bis **{row['ende_zeit']}**")
+                        # Wenn Teams zugewiesen sind
+                        if pd.notna(row.get('betroffene_teams')) and row['betroffene_teams']:
+                            st.write(f"👕 **Teams:** {row['betroffene_teams']}")
+                        st.caption(row['beschreibung'])
+                    
+                    with col2:
+                        st.write(f"Punkte: **{row['punkte_wert']}**")
+                    
+                    with col3:
+                        if pd.isna(row['zugewiesen_an']):
+                            # Aufgabe ist noch frei
+                            # Dropdown zur Auswahl: Ich selbst oder eines meiner Kinder
+                            options = {user['user_id']: "Ich selbst"}
+                            if not children_df.empty:
+                                for _, child in children_df.iterrows():
+                                    options[child['user_id']] = f"Kind: {child['name']}"
+                                    
+                            selected_user_id = st.selectbox(
+                                "Wer übernimmt?", 
+                                options=list(options.keys()), 
+                                format_func=lambda x: options[x],
+                                key=f"sel_{row['task_id']}",
+                                label_visibility="collapsed"
+                            )
+                            
+                            if st.button("Übernehmen", key=f"btn_{row['task_id']}", use_container_width=True):
+                                success, msg = accept_task(row['task_id'], selected_user_id)
+                                if success:
+                                    st.success(msg)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                        else:
+                            # Aufgabe ist vergeben
+                            st.success(f"✅ Angenommen von:\n**{row['assignee_name']}**")
+                            
+                    st.divider() # Trennlinie zwischen den Aufgaben
+        else:
+            st.info("Es sind aktuell keine Aufgaben eingetragen.")
+
+    # ==========================================
+    # TAB 2: KALENDER
+    # ==========================================
+    with tabs[1]:
+        st.subheader("Mein Team-Kalender")
+        st.write("Hier siehst du übersichtlich alle anstehenden Termine, die für deine Mannschaften (und die deiner Kinder) relevant sind.")
+        
+        if not tasks_df.empty:
+            # Sammle alle Teams des Users und seiner Kinder in einem Set (vermeidet Duplikate)
+            my_teams = set()
+            if user.get('team') and user['team'] != "Kein Team":
+                my_teams.update([t.strip() for t in user['team'].split(',')])
+                
+            if not children_df.empty:
+                for _, child in children_df.iterrows():
+                    if child.get('team') and child['team'] != "Kein Team":
+                        my_teams.update([t.strip() for t in child['team'].split(',')])
+                        
+            # Hilfsfunktion zum Filtern der Termine
+            def is_my_team(task_teams_str):
+                if pd.isna(task_teams_str) or not task_teams_str:
+                    return False
+                task_teams = [t.strip() for t in task_teams_str.split(',')]
+                return any(team in my_teams for team in task_teams)
+                
+            # Filtern der Tabelle
+            cal_df = tasks_df[tasks_df['betroffene_teams'].apply(is_my_team)].copy()
+            
+            if not cal_df.empty:
+                # Versuch einer chronologischen Sortierung anhand des Datumsstrings
+                try:
+                    cal_df['sort_date'] = pd.to_datetime(cal_df['start_zeit'].str.replace(' Uhr', ''), format='%d.%m.%Y %H:%M', errors='coerce')
+                    cal_df = cal_df.sort_values(by='sort_date')
+                except:
+                    pass # Falls das Parsen fehlschlägt, behalte die Ursprungssortierung
+                    
+                # Tabelle anzeigen (Index ausblenden für sauberen Look)
+                st.dataframe(
+                    cal_df[['start_zeit', 'ende_zeit', 'kategorie', 'beschreibung', 'betroffene_teams']].rename(
+                        columns={
+                            'start_zeit': 'Start', 
+                            'ende_zeit': 'Ende', 
+                            'kategorie': 'Kategorie', 
+                            'beschreibung': 'Beschreibung', 
+                            'betroffene_teams': 'Teams'
+                        }
+                    ), 
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                if my_teams:
+                    st.info(f"Für deine zugewiesenen Teams ({', '.join(my_teams)}) stehen aktuell keine spezifischen Termine an.")
+                else:
+                    st.info("Dir sind aktuell keine Teams zugewiesen. Bearbeite dein Profil oder lege Kinder an, um hier Termine zu sehen.")
+        else:
+            st.info("Es sind noch keine Aufgaben oder Termine im System angelegt.")
+
+    # ==========================================
+    # TAB 3: FAMILIE
+    # ==========================================
+    with tabs[2]:
+        st.subheader("👨‍👩‍👧 Meine Familie / Kinder")
         st.write("Hier kannst du Familienmitglieder anlegen oder bestehende Kinder mit deinem Account verknüpfen. Du kannst später stellvertretend für sie Vereinsaufgaben übernehmen.")
+        
         if not children_df.empty:
+            # Dropdown zur einfacheren Lösch-Auswahl (Entfernt Verknüpfung)
             st.table(children_df[['name', 'team']].rename(columns={'name': 'Name des Kindes', 'team': 'Mannschaft'}))
             
         tab_new, tab_exist = st.tabs(["➕ Neues Kind anlegen", "🔗 Bestehendes Kind verknüpfen"])
@@ -514,208 +687,48 @@ else:
             else:
                 st.info("Es sind noch keine Kinder im System angelegt worden.")
 
-    # --- ZENTRALER DATENABRUF ---
-    try:
-        tasks_df = get_all_tasks_with_assignees()
-    except Exception:
-        tasks_df = pd.DataFrame()
-
-    # --- 📅 Mein Team-Kalender ---
-    st.markdown("---")
-    st.subheader("📅 Mein Team-Kalender")
-    st.write("Hier siehst du übersichtlich alle anstehenden Termine, die für deine Mannschaften (und die deiner Kinder) relevant sind.")
-    
-    if not tasks_df.empty:
-        # Sammle alle Teams des Users und seiner Kinder in einem Set (vermeidet Duplikate)
-        my_teams = set()
-        if user.get('team') and user['team'] != "Kein Team":
-            my_teams.update([t.strip() for t in user['team'].split(',')])
-            
-        if not children_df.empty:
-            for _, child in children_df.iterrows():
-                if child.get('team') and child['team'] != "Kein Team":
-                    my_teams.update([t.strip() for t in child['team'].split(',')])
-                    
-        # Hilfsfunktion zum Filtern der Termine
-        def is_my_team(task_teams_str):
-            if pd.isna(task_teams_str) or not task_teams_str:
-                return False
-            task_teams = [t.strip() for t in task_teams_str.split(',')]
-            return any(team in my_teams for team in task_teams)
-            
-        # Filtern der Tabelle
-        cal_df = tasks_df[tasks_df['betroffene_teams'].apply(is_my_team)].copy()
-        
-        if not cal_df.empty:
-            # Versuch einer chronologischen Sortierung anhand des Datumsstrings
-            try:
-                cal_df['sort_date'] = pd.to_datetime(cal_df['start_zeit'].str.replace(' Uhr', ''), format='%d.%m.%Y %H:%M', errors='coerce')
-                cal_df = cal_df.sort_values(by='sort_date')
-            except:
-                pass # Falls das Parsen fehlschlägt, behalte die Ursprungssortierung
-                
-            # Tabelle anzeigen (Index ausblenden für sauberen Look)
-            st.dataframe(
-                cal_df[['start_zeit', 'ende_zeit', 'kategorie', 'beschreibung', 'betroffene_teams']].rename(
-                    columns={
-                        'start_zeit': 'Start', 
-                        'ende_zeit': 'Ende', 
-                        'kategorie': 'Kategorie', 
-                        'beschreibung': 'Beschreibung', 
-                        'betroffene_teams': 'Teams'
-                    }
-                ), 
-                use_container_width=True,
-                hide_index=True
-            )
-        else:
-            if my_teams:
-                st.info(f"Für deine zugewiesenen Teams ({', '.join(my_teams)}) stehen aktuell keine spezifischen Termine an.")
-            else:
-                st.info("Dir sind aktuell keine Teams zugewiesen. Bearbeite dein Profil oder lege Kinder an, um hier Termine zu sehen.")
-    else:
-        st.info("Es sind noch keine Aufgaben oder Termine im System angelegt.")
-
-    # --- Haupt-Dashboard: AUFGABEN ---
-    st.markdown("---")
-    st.subheader("📋 Aktuelle Aufgaben & Schichten")
-    
-    # 1. Aufgaben erstellen (Nur für Admins & Organisatoren)
-    if user['rolle'] in ['Admin', 'Organisator']:
-        with st.expander("➕ Neue Aufgabe anlegen"):
-            with st.form("new_task_form"):
-                kategorie_input = st.text_input("Kategorie (z.B. Hallenaufbau, Catering, Schiedsgericht)")
-                beschreibung_input = st.text_area("Beschreibung / Details")
-                punkte_input = st.number_input("Punkte-Wert", min_value=1, value=1)
-                
-                # Datum- und Zeit-Auswahl
-                col1, col2 = st.columns(2)
-                with col1:
-                    start_date = st.date_input("Startdatum", value=datetime.date.today())
-                    start_time = st.time_input("Startzeit", value=datetime.time(10, 0))
-                with col2:
-                    end_date = st.date_input("Enddatum", value=datetime.date.today())
-                    end_time = st.time_input("Endzeit", value=datetime.time(12, 0))
-                
-                # Neues Feld für betroffene Teams
-                task_teams = st.multiselect("Betroffene Teams (optional)", TEAM_LISTE)
-                
-                if st.form_submit_button("Aufgabe speichern"):
-                    if kategorie_input and beschreibung_input:
-                        # Datum und Zeit schön als String formatieren
-                        start_dt_str = f"{start_date.strftime('%d.%m.%Y')} {start_time.strftime('%H:%M')} Uhr"
-                        end_dt_str = f"{end_date.strftime('%d.%m.%Y')} {end_time.strftime('%H:%M')} Uhr"
-                        teams_str = ", ".join(task_teams) if task_teams else None
-                        
-                        success, msg = create_task(
-                            kategorie=kategorie_input, 
-                            beschreibung=beschreibung_input, 
-                            punkte_wert=punkte_input,
-                            start_zeit=start_dt_str,
-                            ende_zeit=end_dt_str,
-                            betroffene_teams=teams_str
-                        )
-                        if success:
-                            st.success(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
-                    else:
-                        st.error("Bitte Kategorie und Beschreibung ausfüllen.")
-                        
-    st.write("") # Etwas Abstand
-    
-    # 2. Aufgaben auflisten & annehmen (Für alle)
-    if not tasks_df.empty:
-        for _, row in tasks_df.iterrows():
-            with st.container():
-                col1, col2, col3 = st.columns([4, 1, 3])
-                
-                with col1:
-                    st.write(f"**{row['kategorie']}**")
-                    # Wenn Zeiten vorhanden sind, zeige sie mit einem Icon an
-                    if pd.notna(row.get('start_zeit')) and pd.notna(row.get('ende_zeit')):
-                        st.write(f"🗓️ **{row['start_zeit']}** bis **{row['ende_zeit']}**")
-                    # Wenn Teams zugewiesen sind
-                    if pd.notna(row.get('betroffene_teams')) and row['betroffene_teams']:
-                        st.write(f"👕 **Teams:** {row['betroffene_teams']}")
-                    st.caption(row['beschreibung'])
-                
-                with col2:
-                    st.write(f"Punkte: **{row['punkte_wert']}**")
-                
-                with col3:
-                    if pd.isna(row['zugewiesen_an']):
-                        # Aufgabe ist noch frei
-                        # Dropdown zur Auswahl: Ich selbst oder eines meiner Kinder
-                        options = {user['user_id']: "Ich selbst"}
-                        if not children_df.empty:
-                            for _, child in children_df.iterrows():
-                                options[child['user_id']] = f"Kind: {child['name']}"
-                                
-                        selected_user_id = st.selectbox(
-                            "Wer übernimmt?", 
-                            options=list(options.keys()), 
-                            format_func=lambda x: options[x],
-                            key=f"sel_{row['task_id']}",
-                            label_visibility="collapsed"
-                        )
-                        
-                        if st.button("Übernehmen", key=f"btn_{row['task_id']}", use_container_width=True):
-                            success, msg = accept_task(row['task_id'], selected_user_id)
-                            if success:
-                                st.success(msg)
-                                st.rerun()
-                            else:
-                                st.error(msg)
-                    else:
-                        # Aufgabe ist vergeben
-                        st.success(f"✅ Angenommen von:\n**{row['assignee_name']}**")
-                        
-                st.divider() # Trennlinie zwischen den Aufgaben
-    else:
-        st.info("Es sind aktuell keine Aufgaben eingetragen.")
-
-    # --- Admin-Bereich (Nur für Admins sichtbar) ---
+    # ==========================================
+    # TAB 4: ADMIN
+    # ==========================================
     if user['rolle'] == 'Admin':
-        st.markdown("---")
-        st.subheader("👥 Admin-Bereich: Benutzerverwaltung")
-        try:
-            with engine.connect() as conn:
-                # Hole alle User inkl. dem neuen 'team' Feld
-                df_users = pd.read_sql("SELECT user_id, name, email, rolle, team, dsgvo_akzeptiert, parent_id FROM users", conn)
-            
-            # Neue Typisierung: Verlässt sich primär auf die Rolle, da parent_id jetzt primär im parent_child table steht
-            df_users['Typ'] = df_users['rolle'].apply(lambda x: 'Kind / Sub-Account' if x == 'Kind' else 'Haupt-Account')
-            st.dataframe(df_users[['user_id', 'name', 'email', 'rolle', 'team', 'Typ', 'dsgvo_akzeptiert']], use_container_width=True)
-            
-            # NEU: Formular zum Löschen von Benutzern oder doppelten Kindern
-            with st.expander("🗑️ Account oder doppeltes Kind löschen"):
-                with st.form("delete_user_form"):
-                    st.write("Wähle hier einen Account aus, der vollständig gelöscht werden soll (Aufgaben werden wieder freigegeben).")
-                    
-                    # Dictionary zum sauberen Anzeigen in der Selectbox
-                    user_options = {
-                        row['user_id']: f"{row['name']} ({row['Typ']}, Team: {row['team']})" 
-                        for _, row in df_users.iterrows()
-                    }
-                    
-                    selected_del_id = st.selectbox(
-                        "Zu löschender Account:", 
-                        options=list(user_options.keys()), 
-                        format_func=lambda x: user_options[x]
-                    )
-                    
-                    if st.form_submit_button("Account unwiderruflich löschen"):
-                        if selected_del_id == user['user_id']:
-                            st.error("Sicherheitsblockade: Du kannst dich nicht selbst als Admin löschen!")
-                        else:
-                            success, msg = delete_user(selected_del_id)
-                            if success:
-                                st.success(msg)
-                                st.rerun()
+        with tabs[3]:
+            st.subheader("👥 Admin-Bereich: Benutzerverwaltung")
+            try:
+                with engine.connect() as conn:
+                    # Hole alle User inkl. dem neuen 'team' Feld
+                    df_users = pd.read_sql("SELECT user_id, name, email, rolle, team, dsgvo_akzeptiert, parent_id FROM users", conn)
+                
+                # Neue Typisierung: Verlässt sich primär auf die Rolle, da parent_id jetzt primär im parent_child table steht
+                df_users['Typ'] = df_users['rolle'].apply(lambda x: 'Kind / Sub-Account' if x == 'Kind' else 'Haupt-Account')
+                st.dataframe(df_users[['user_id', 'name', 'email', 'rolle', 'team', 'Typ', 'dsgvo_akzeptiert']], use_container_width=True)
+                
+                # NEU: Formular zum Löschen von Benutzern oder doppelten Kindern
+                with st.expander("🗑️ Account oder doppeltes Kind löschen"):
+                    with st.form("delete_user_form"):
+                        st.write("Wähle hier einen Account aus, der vollständig gelöscht werden soll (Aufgaben werden wieder freigegeben).")
+                        
+                        # Dictionary zum sauberen Anzeigen in der Selectbox
+                        user_options = {
+                            row['user_id']: f"{row['name']} ({row['Typ']}, Team: {row['team']})" 
+                            for _, row in df_users.iterrows()
+                        }
+                        
+                        selected_del_id = st.selectbox(
+                            "Zu löschender Account:", 
+                            options=list(user_options.keys()), 
+                            format_func=lambda x: user_options[x]
+                        )
+                        
+                        if st.form_submit_button("Account unwiderruflich löschen"):
+                            if selected_del_id == user['user_id']:
+                                st.error("Sicherheitsblockade: Du kannst dich nicht selbst als Admin löschen!")
                             else:
-                                st.error(msg)
-                                
-        except Exception as e:
-            st.error(f"Fehler beim Laden der Benutzerliste: {e}")
+                                success, msg = delete_user(selected_del_id)
+                                if success:
+                                    st.success(msg)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                                    
+            except Exception as e:
+                st.error(f"Fehler beim Laden der Benutzerliste: {e}")
