@@ -90,7 +90,6 @@ def update_db_schema(engine):
                 event_id INTEGER REFERENCES events(event_id),
                 kategorie TEXT,
                 beschreibung TEXT,
-                punkte_wert INTEGER,
                 zugewiesen_an INTEGER REFERENCES users(user_id),
                 tausch_angefragt INTEGER DEFAULT 0
             );
@@ -338,7 +337,7 @@ def get_all_tasks_with_assignees():
     """Lädt alle Aufgaben und aggregiert mehrere zugewiesene Personen pro Aufgabe."""
     try:
         query = text("""
-            SELECT t.task_id, t.kategorie, t.beschreibung, t.punkte_wert, t.start_zeit, t.ende_zeit, 
+            SELECT t.task_id, t.kategorie, t.beschreibung, t.start_zeit, t.ende_zeit, 
                    t.betroffene_teams, t.erstellt_von, t.helfer_benoetigt,
                    COUNT(ta.user_id) as helfer_aktuell,
                    STRING_AGG(u.name, ', ') as assignee_names,
@@ -346,7 +345,7 @@ def get_all_tasks_with_assignees():
             FROM tasks t
             LEFT JOIN task_assignments ta ON t.task_id = ta.task_id
             LEFT JOIN users u ON ta.user_id = u.user_id
-            GROUP BY t.task_id, t.kategorie, t.beschreibung, t.punkte_wert, t.start_zeit, t.ende_zeit, t.betroffene_teams, t.erstellt_von, t.helfer_benoetigt
+            GROUP BY t.task_id, t.kategorie, t.beschreibung, t.start_zeit, t.ende_zeit, t.betroffene_teams, t.erstellt_von, t.helfer_benoetigt
             ORDER BY t.start_zeit ASC, t.task_id DESC
         """)
         with engine.connect() as conn:
@@ -354,19 +353,18 @@ def get_all_tasks_with_assignees():
     except Exception:
         return pd.DataFrame()
 
-def create_task(kategorie, beschreibung, punkte_wert, erstellt_von=None, start_zeit=None, ende_zeit=None, betroffene_teams=None, helfer_benoetigt=1):
+def create_task(kategorie, beschreibung, erstellt_von=None, start_zeit=None, ende_zeit=None, betroffene_teams=None, helfer_benoetigt=1):
     """Erstellt eine neue Aufgabe in der Datenbank."""
     try:
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO tasks (kategorie, beschreibung, punkte_wert, start_zeit, ende_zeit, betroffene_teams, erstellt_von, helfer_benoetigt)
-                    VALUES (:kat, :besch, :pkt, :start, :ende, :teams, :ersteller, :helfer)
+                    INSERT INTO tasks (kategorie, beschreibung, start_zeit, ende_zeit, betroffene_teams, erstellt_von, helfer_benoetigt)
+                    VALUES (:kat, :besch, :start, :ende, :teams, :ersteller, :helfer)
                 """),
                 {
                     "kat": kategorie, 
                     "besch": beschreibung, 
-                    "pkt": punkte_wert,
                     "start": start_zeit,
                     "ende": ende_zeit,
                     "teams": betroffene_teams,
@@ -532,12 +530,8 @@ else:
                     kategorie_input = st.text_input("Kategorie (z.B. Hallenaufbau, Catering, Schiedsgericht)")
                     beschreibung_input = st.text_area("Beschreibung / Details")
                     
-                    # Punkte und benötigte Helfer nebeneinander
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        punkte_input = st.number_input("Punkte-Wert pro Helfer", min_value=1, value=1)
-                    with col2:
-                        helfer_input = st.number_input("Anzahl benötigter Helfer", min_value=1, value=1)
+                    # Anzahl benötigter Helfer
+                    helfer_input = st.number_input("Anzahl benötigter Helfer", min_value=1, value=1)
                     
                     # Datum- und Zeit-Auswahl
                     col1, col2 = st.columns(2)
@@ -561,7 +555,6 @@ else:
                             success, msg = create_task(
                                 kategorie=kategorie_input, 
                                 beschreibung=beschreibung_input, 
-                                punkte_wert=punkte_input,
                                 erstellt_von=user['user_id'],
                                 start_zeit=start_dt_str,
                                 ende_zeit=end_dt_str,
@@ -595,7 +588,6 @@ else:
                         st.caption(row['beschreibung'])
                     
                     with col2:
-                        st.write(f"Punkte: **{row['punkte_wert']}**")
                         # Zeige Status der Helfer
                         aktuell = row.get('helfer_aktuell', 0)
                         max_helfer = row.get('helfer_benoetigt', 1)
