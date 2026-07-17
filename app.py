@@ -101,6 +101,10 @@ def update_db_schema(engine):
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS start_zeit TEXT;"))
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ende_zeit TEXT;"))
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS betroffene_teams TEXT;"))
+            
+            # NEU: Ersteller und benötigte Helfer speichern
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS erstellt_von INTEGER REFERENCES users(user_id);"))
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS helfer_benoetigt INTEGER DEFAULT 1;"))
         except Exception:
             pass
             
@@ -118,6 +122,25 @@ def update_db_schema(engine):
                 INSERT INTO parent_child (parent_id, child_id)
                 SELECT parent_id, user_id FROM users 
                 WHERE parent_id IS NOT NULL
+                ON CONFLICT DO NOTHING;
+            """))
+        except Exception:
+            pass
+
+        # NEU: Tabelle für Task-Zuweisungen (Mehrere Helfer pro Aufgabe)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS task_assignments (
+                task_id INTEGER REFERENCES tasks(task_id) ON DELETE CASCADE,
+                user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+                PRIMARY KEY (task_id, user_id)
+            );
+        """))
+        try:
+            # Migration: Alte Einzel-Zuweisungen in neue Zuweisungs-Tabelle übertragen
+            conn.execute(text("""
+                INSERT INTO task_assignments (task_id, user_id)
+                SELECT task_id, zugewiesen_an FROM tasks 
+                WHERE zugewiesen_an IS NOT NULL
                 ON CONFLICT DO NOTHING;
             """))
         except Exception:
@@ -269,8 +292,9 @@ def delete_user(user_id):
             # 2. Alte parent_id Struktur bereinigen
             conn.execute(text("UPDATE users SET parent_id = NULL WHERE parent_id = :id"), {"id": user_id})
             
-            # 3. Aufgaben freigeben (nicht löschen, nur Zuweisung entfernen)
+            # 3. Aufgaben freigeben (aus neuer und alter Struktur)
             conn.execute(text("UPDATE tasks SET zugewiesen_an = NULL WHERE zugewiesen_an = :id"), {"id": user_id})
+            conn.execute(text("DELETE FROM task_assignments WHERE user_id = :id"), {"id": user_id})
             
             # 4. Endgültig den User löschen
             conn.execute(text("DELETE FROM users WHERE user_id = :id"), {"id": user_id})
@@ -278,6 +302,16 @@ def delete_user(user_id):
         return True, "Der Account wurde erfolgreich und sicher gelöscht."
     except Exception as e:
         return False, f"Fehler beim Löschen: {e}"
+
+def delete_task_by_id(task_id):
+    """Löscht eine Aufgabe vollständig (inklusive Helfer-Zuweisungen)."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM task_assignments WHERE task_id = :id"), {"id": task_id})
+            conn.execute(text("DELETE FROM tasks WHERE task_id = :id"), {"id": task_id})
+        return True, "Aufgabe wurde erfolgreich gelöscht."
+    except Exception as e:
+        return False, f"Fehler beim Löschen der Aufgabe: {e}"
 
 def authenticate(email, password):
     """Prüft E-Mail und Passwort beim Login."""
@@ -301,27 +335,33 @@ def get_user_by_id(user_id):
     return None
 
 def get_all_tasks_with_assignees():
-    """Lädt alle Aufgaben und verknüpft sie mit dem Namen der zugewiesenen Person."""
+    """Lädt alle Aufgaben und aggregiert mehrere zugewiesene Personen pro Aufgabe."""
     try:
         query = text("""
-            SELECT t.task_id, t.kategorie, t.beschreibung, t.punkte_wert, t.zugewiesen_an, t.start_zeit, t.ende_zeit, t.betroffene_teams, u.name as assignee_name
+            SELECT t.task_id, t.kategorie, t.beschreibung, t.punkte_wert, t.start_zeit, t.ende_zeit, 
+                   t.betroffene_teams, t.erstellt_von, t.helfer_benoetigt,
+                   COUNT(ta.user_id) as helfer_aktuell,
+                   STRING_AGG(u.name, ', ') as assignee_names,
+                   STRING_AGG(CAST(u.user_id AS TEXT), ',') as assignee_ids
             FROM tasks t
-            LEFT JOIN users u ON t.zugewiesen_an = u.user_id
-            ORDER BY t.task_id DESC
+            LEFT JOIN task_assignments ta ON t.task_id = ta.task_id
+            LEFT JOIN users u ON ta.user_id = u.user_id
+            GROUP BY t.task_id, t.kategorie, t.beschreibung, t.punkte_wert, t.start_zeit, t.ende_zeit, t.betroffene_teams, t.erstellt_von, t.helfer_benoetigt
+            ORDER BY t.start_zeit ASC, t.task_id DESC
         """)
         with engine.connect() as conn:
             return pd.read_sql(query, conn)
     except Exception:
         return pd.DataFrame()
 
-def create_task(kategorie, beschreibung, punkte_wert, start_zeit=None, ende_zeit=None, betroffene_teams=None):
+def create_task(kategorie, beschreibung, punkte_wert, erstellt_von=None, start_zeit=None, ende_zeit=None, betroffene_teams=None, helfer_benoetigt=1):
     """Erstellt eine neue Aufgabe in der Datenbank."""
     try:
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO tasks (kategorie, beschreibung, punkte_wert, start_zeit, ende_zeit, betroffene_teams)
-                    VALUES (:kat, :besch, :pkt, :start, :ende, :teams)
+                    INSERT INTO tasks (kategorie, beschreibung, punkte_wert, start_zeit, ende_zeit, betroffene_teams, erstellt_von, helfer_benoetigt)
+                    VALUES (:kat, :besch, :pkt, :start, :ende, :teams, :ersteller, :helfer)
                 """),
                 {
                     "kat": kategorie, 
@@ -329,7 +369,9 @@ def create_task(kategorie, beschreibung, punkte_wert, start_zeit=None, ende_zeit
                     "pkt": punkte_wert,
                     "start": start_zeit,
                     "ende": ende_zeit,
-                    "teams": betroffene_teams
+                    "teams": betroffene_teams,
+                    "ersteller": erstellt_von,
+                    "helfer": helfer_benoetigt
                 }
             )
         return True, "Aufgabe erfolgreich angelegt!"
@@ -337,11 +379,11 @@ def create_task(kategorie, beschreibung, punkte_wert, start_zeit=None, ende_zeit
         return False, f"Fehler beim Erstellen der Aufgabe: {e}"
 
 def accept_task(task_id, user_id):
-    """Weist eine Aufgabe einem Benutzer (oder Kind) zu."""
+    """Weist eine Aufgabe einem Benutzer (oder Kind) zu (Mehrfachzuweisung erlaubt)."""
     try:
         with engine.begin() as conn:
             conn.execute(
-                text("UPDATE tasks SET zugewiesen_an = :user_id WHERE task_id = :task_id"),
+                text("INSERT INTO task_assignments (task_id, user_id) VALUES (:task_id, :user_id) ON CONFLICT DO NOTHING"),
                 {"user_id": user_id, "task_id": task_id}
             )
         return True, "Aufgabe erfolgreich übernommen!"
@@ -489,7 +531,13 @@ else:
                 with st.form("new_task_form"):
                     kategorie_input = st.text_input("Kategorie (z.B. Hallenaufbau, Catering, Schiedsgericht)")
                     beschreibung_input = st.text_area("Beschreibung / Details")
-                    punkte_input = st.number_input("Punkte-Wert", min_value=1, value=1)
+                    
+                    # Punkte und benötigte Helfer nebeneinander
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        punkte_input = st.number_input("Punkte-Wert pro Helfer", min_value=1, value=1)
+                    with col2:
+                        helfer_input = st.number_input("Anzahl benötigter Helfer", min_value=1, value=1)
                     
                     # Datum- und Zeit-Auswahl
                     col1, col2 = st.columns(2)
@@ -514,9 +562,11 @@ else:
                                 kategorie=kategorie_input, 
                                 beschreibung=beschreibung_input, 
                                 punkte_wert=punkte_input,
+                                erstellt_von=user['user_id'],
                                 start_zeit=start_dt_str,
                                 ende_zeit=end_dt_str,
-                                betroffene_teams=teams_str
+                                betroffene_teams=teams_str,
+                                helfer_benoetigt=helfer_input
                             )
                             if success:
                                 st.success(msg)
@@ -546,34 +596,62 @@ else:
                     
                     with col2:
                         st.write(f"Punkte: **{row['punkte_wert']}**")
+                        # Zeige Status der Helfer
+                        aktuell = row.get('helfer_aktuell', 0)
+                        max_helfer = row.get('helfer_benoetigt', 1)
+                        if aktuell >= max_helfer:
+                            st.success(f"👥 Voll: {aktuell} / {max_helfer} Helfer")
+                        else:
+                            st.warning(f"👥 Offen: {aktuell} / {max_helfer} Helfer")
                     
                     with col3:
-                        if pd.isna(row['zugewiesen_an']):
-                            # Aufgabe ist noch frei
+                        # IDs der bereits zugewiesenen Personen extrahieren
+                        assignee_ids = str(row.get('assignee_ids', '')).split(',')
+                        
+                        if aktuell < max_helfer:
                             # Dropdown zur Auswahl: Ich selbst oder eines meiner Kinder
                             options = {user['user_id']: "Ich selbst"}
                             if not children_df.empty:
                                 for _, child in children_df.iterrows():
                                     options[child['user_id']] = f"Kind: {child['name']}"
                                     
-                            selected_user_id = st.selectbox(
-                                "Wer übernimmt?", 
-                                options=list(options.keys()), 
-                                format_func=lambda x: options[x],
-                                key=f"sel_{row['task_id']}",
-                                label_visibility="collapsed"
-                            )
+                            # Filtere User heraus, die für diese Aufgabe SCHON eingetragen sind
+                            available_options = {k: v for k, v in options.items() if str(k) not in assignee_ids}
                             
-                            if st.button("Übernehmen", key=f"btn_{row['task_id']}", use_container_width=True):
-                                success, msg = accept_task(row['task_id'], selected_user_id)
+                            if available_options:
+                                selected_user_id = st.selectbox(
+                                    "Wer übernimmt?", 
+                                    options=list(available_options.keys()), 
+                                    format_func=lambda x: available_options[x],
+                                    key=f"sel_{row['task_id']}",
+                                    label_visibility="collapsed"
+                                )
+                                
+                                if st.button("Übernehmen", key=f"btn_{row['task_id']}", use_container_width=True):
+                                    success, msg = accept_task(row['task_id'], selected_user_id)
+                                    if success:
+                                        st.success(msg)
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+                            else:
+                                st.success("Deine ganze Familie hilft hier bereits!")
+                        else:
+                            st.success("✅ Aufgabe ist voll besetzt!")
+                            
+                        # Helfer auflisten, falls vorhanden
+                        if pd.notna(row.get('assignee_names')) and row['assignee_names']:
+                            st.info(f"Dabei sind: {row['assignee_names']}")
+                            
+                        # Löschen Button für Ersteller oder Admin
+                        if user['rolle'] == 'Admin' or row.get('erstellt_von') == user['user_id']:
+                            if st.button("🗑️ Aufgabe Löschen", key=f"del_{row['task_id']}", help="Aufgabe endgültig löschen"):
+                                success, msg = delete_task_by_id(row['task_id'])
                                 if success:
                                     st.success(msg)
                                     st.rerun()
                                 else:
                                     st.error(msg)
-                        else:
-                            # Aufgabe ist vergeben
-                            st.success(f"✅ Angenommen von:\n**{row['assignee_name']}**")
                             
                     st.divider() # Trennlinie zwischen den Aufgaben
         else:
