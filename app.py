@@ -15,15 +15,22 @@ st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide")
 # Verbindung aufbauen (Daten kommen sicher aus den Streamlit Secrets)
 try:
     DB_URL = st.secrets["DB_URL"]
+    
+    # Sicherheits-Fix: SQLAlchemy 1.4+ erfordert 'postgresql://' statt 'postgres://'
+    if DB_URL.startswith("postgres://"):
+        DB_URL = DB_URL.replace("postgres://", "postgresql://", 1)
+        
     engine = create_engine(
         DB_URL, 
-        connect_args={"sslmode": "require", "connect_timeout": 15},
+        connect_args={
+            "sslmode": "require",
+            "connect_timeout": 15
+        },
         pool_pre_ping=True
     )
 except Exception as e:
     st.error(f"Datenbankfehler beim Verbindungsaufbau: {e}")
     st.stop()
-
 
 # ==========================================
 # 2. DATENBANK-TABELLEN INITIALISIEREN
