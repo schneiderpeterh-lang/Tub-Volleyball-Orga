@@ -114,6 +114,16 @@ def update_db_schema(_engine):
                 user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE
             );
         """))
+
+        # NEU: Tabelle für die Spieler-Teilnahme an Events
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS event_attendance (
+                event_id INTEGER REFERENCES events(event_id) ON DELETE CASCADE,
+                user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+                status TEXT NOT NULL,
+                PRIMARY KEY (event_id, user_id)
+            );
+        """))
     return True
 
 try:
