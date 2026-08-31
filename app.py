@@ -377,12 +377,62 @@ else:
         
         rel_events = events_df[events_df['betroffene_teams'].apply(is_relevant)] if not events_df.empty else pd.DataFrame()
         
+        # Admin-Optionen einmalig laden
+        admin_options = {}
+        if user['rolle'] in ['Admin', 'Organisator']:
+            try:
+                with engine.connect() as conn:
+                    all_u = pd.read_sql(text("SELECT user_id, name FROM users ORDER BY name"), conn)
+                    admin_options = {row['user_id']: f"Admin-Zuweisung: {row['name']}" for _, row in all_u.iterrows()}
+            except: pass
+            
         # Helfer-Funktion zum Zeichnen der Events, damit wir Code nicht doppeln
         def render_event_list(events_to_show):
             for _, ev in events_to_show.iterrows():
                 ev_id = ev['event_id']
                 with st.expander(f"🏐 {ev['titel']} ({ev['start_zeit']})", expanded=False):
                     st.write(f"📍 **Ort:** {ev['ort']} | 👕 **Teams:** {ev['betroffene_teams']}")
+                    
+                    # --- NEU: TEILNAHME (ATTENDANCE) ---
+                    st.markdown("#### 🏃‍♂️ Spieler-Teilnahme")
+                    attendance_df = get_event_attendance(ev_id)
+                    
+                    if not attendance_df.empty:
+                        dabei = attendance_df[attendance_df['status'] == 'dabei']['name'].tolist()
+                        abgesagt = attendance_df[attendance_df['status'] == 'abgesagt']['name'].tolist()
+                        
+                        if dabei:
+                            st.success(f"✅ **Dabei ({len(dabei)}):** " + ", ".join(dabei))
+                        if abgesagt:
+                            st.error(f"❌ **Abgesagt ({len(abgesagt)}):** " + ", ".join(abgesagt))
+                    else:
+                        st.info("Noch keine Rückmeldungen für diesen Spieltag.")
+                    
+                    # Dropdown für Teilnahme
+                    att_options = {user['user_id']: "Ich selbst"}
+                    if not children_df.empty:
+                        for _, child in children_df.iterrows(): 
+                            att_options[child['user_id']] = f"Kind: {child['name']}"
+                    
+                    if user['rolle'] in ['Admin', 'Organisator']:
+                        for uid, uname in admin_options.items():
+                            if uid not in att_options:
+                                att_options[uid] = uname
+                                
+                    c1, c2, c3 = st.columns([2, 1, 1])
+                    with c1:
+                        sel_att_u = st.selectbox("Wer?", list(att_options.keys()), format_func=lambda x: att_options[x], key=f"att_u_{ev_id}", label_visibility="collapsed")
+                    with c2:
+                        if st.button("✅ Bin dabei", key=f"btn_yes_{ev_id}", use_container_width=True):
+                            set_event_attendance(ev_id, sel_att_u, 'dabei')
+                            st.rerun()
+                    with c3:
+                        if st.button("❌ Absagen", key=f"btn_no_{ev_id}", use_container_width=True):
+                            set_event_attendance(ev_id, sel_att_u, 'abgesagt')
+                            st.rerun()
+                            
+                    st.divider()
+                    # --- ENDE TEILNAHME ---
                     
                     # Tasks für dieses Event laden
                     ev_tasks = tasks_df[tasks_df['event_id'] == ev_id] if not tasks_df.empty else pd.DataFrame()
