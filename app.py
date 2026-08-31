@@ -14,6 +14,12 @@ except ImportError:
     st.error("📦 **Fehlendes Paket!** Bitte füge `icalendar` zu deiner `requirements.txt` auf GitHub hinzu, um den Kalender-Import zu nutzen.")
     st.stop()
 
+try:
+    from streamlit_calendar import calendar
+    HAS_CALENDAR = True
+except ImportError:
+    HAS_CALENDAR = False
+
 # ==========================================
 # 1. KONFIGURATION & DATENBANK-VERBINDUNG
 # ==========================================
@@ -701,7 +707,7 @@ else:
     # TAB 5: ADMIN
     # ----------------------------------------------------
     if user['rolle'] == 'Admin':
-        with tabs[4]:
+        with tab_admin:
             st.subheader("📅 ICS Kalender-Import")
             st.write("Lade hier den Spielplan (ICS-Datei aus SAMS/Web) eines Teams hoch. Daraus werden automatisch 'Events' erstellt.")
             with st.form("ics_import"):
