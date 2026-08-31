@@ -19,7 +19,7 @@ except ImportError:
 # ==========================================
 st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide")
 
-# CACHING DER DATENBANKVERBINDUNG (Löst das Performance-Problem beim Neu-Laden)
+# CACHING DER DATENBANKVERBINDUNG
 @st.cache_resource
 def get_database_engine():
     try:
@@ -38,7 +38,6 @@ engine = get_database_engine()
 # ==========================================
 # 2. DATENBANK-TABELLEN INITIALISIEREN
 # ==========================================
-# Wird nur einmal pro Session ausgeführt
 @st.cache_resource
 def update_db_schema(_engine):
     with _engine.begin() as conn:
@@ -75,7 +74,6 @@ def update_db_schema(_engine):
                 event_id INTEGER REFERENCES events(event_id),
                 kategorie TEXT,
                 beschreibung TEXT,
-                punkte_wert INTEGER,
                 zugewiesen_an INTEGER REFERENCES users(user_id),
                 tausch_angefragt INTEGER DEFAULT 0
             );
@@ -106,7 +104,6 @@ def update_db_schema(_engine):
             );
         """))
         
-        # Task Assignments (Mehrere Helfer pro Aufgabe)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS task_assignments (
                 assignment_id SERIAL PRIMARY KEY,
@@ -115,7 +112,6 @@ def update_db_schema(_engine):
             );
         """))
 
-        # Tabelle für die Spieler-Teilnahme an Events
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS event_attendance (
                 event_id INTEGER REFERENCES events(event_id) ON DELETE CASCADE,
@@ -146,14 +142,21 @@ def verify_password(password: str, hashed_password: str) -> bool:
     hash_obj = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
     return hash_obj.hex() == hash_hex
 
-# Cache löschen nach Datenänderungen
 def clear_caches():
     st.cache_data.clear()
 
+@st.cache_data(ttl=60)
 def get_user_count():
     try:
         with engine.connect() as conn: return conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
     except: return 0
+
+@st.cache_data(ttl=60)
+def get_all_users():
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(text("SELECT user_id, name, email, rolle, team FROM users ORDER BY name"), conn)
+    except: return pd.DataFrame()
 
 def create_initial_admin(name, email, password):
     hashed = hash_password(password)
@@ -224,6 +227,7 @@ def delete_user(user_id):
             conn.execute(text("DELETE FROM parent_child WHERE parent_id = :id OR child_id = :id"), {"id": user_id})
             conn.execute(text("UPDATE users SET parent_id = NULL WHERE parent_id = :id"), {"id": user_id})
             conn.execute(text("DELETE FROM task_assignments WHERE user_id = :id"), {"id": user_id})
+            conn.execute(text("DELETE FROM event_attendance WHERE user_id = :id"), {"id": user_id})
             conn.execute(text("DELETE FROM users WHERE user_id = :id"), {"id": user_id})
         clear_caches()
         return True, "Account gelöscht."
@@ -233,7 +237,6 @@ def delete_user(user_id):
 # 4. EVENTS & AUFGABEN SQL
 # ==========================================
 def parse_and_import_ics(file_bytes, team_str):
-    """Liest eine ICS Datei und speichert VEVENTs in der Datenbank"""
     try:
         cal = icalendar.Calendar.from_ical(file_bytes)
         events_added = 0
@@ -243,7 +246,6 @@ def parse_and_import_ics(file_bytes, team_str):
                     titel = str(component.get('summary', 'Unbekanntes Event'))
                     ort = str(component.get('location', ''))
                     
-                    # Startzeit
                     dtstart = component.get('dtstart')
                     start_str = ""
                     if dtstart:
@@ -251,7 +253,6 @@ def parse_and_import_ics(file_bytes, team_str):
                         if isinstance(start_dt, datetime.datetime): start_str = start_dt.strftime('%d.%m.%Y %H:%M')
                         else: start_str = start_dt.strftime('%d.%m.%Y')
                         
-                    # Endzeit
                     dtend = component.get('dtend')
                     ende_str = ""
                     if dtend:
@@ -289,6 +290,17 @@ def get_task_assignments():
             return pd.read_sql(text("SELECT ta.task_id, ta.user_id, u.name as assignee_name FROM task_assignments ta JOIN users u ON ta.user_id = u.user_id"), conn)
     except: return pd.DataFrame()
 
+@st.cache_data(ttl=60)
+def get_all_attendance():
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(text("""
+                SELECT ea.event_id, ea.user_id, ea.status, u.name 
+                FROM event_attendance ea
+                JOIN users u ON ea.user_id = u.user_id
+            """), conn)
+    except: return pd.DataFrame()
+
 def create_task(kategorie, beschreibung, max_helfer, user_id, start=None, ende=None, teams=None, event_id=None):
     try:
         with engine.begin() as conn:
@@ -311,24 +323,12 @@ def delete_task(task_id):
 def delete_event(event_id):
     try:
         with engine.begin() as conn:
-            # Lösche erst alle Tasks und Teilnahmen, die an dieses Event gekoppelt sind
             conn.execute(text("DELETE FROM tasks WHERE event_id = :e"), {"e": event_id})
             conn.execute(text("DELETE FROM event_attendance WHERE event_id = :e"), {"e": event_id})
             conn.execute(text("DELETE FROM events WHERE event_id = :e"), {"e": event_id})
         clear_caches()
         return True, "Spieltag inkl. Aufgaben gelöscht!"
     except Exception as e: return False, str(e)
-
-def get_event_attendance(event_id):
-    try:
-        with engine.connect() as conn:
-            return pd.read_sql(text("""
-                SELECT ea.user_id, ea.status, u.name 
-                FROM event_attendance ea
-                JOIN users u ON ea.user_id = u.user_id
-                WHERE ea.event_id = :e
-            """), conn, params={"e": event_id})
-    except: return pd.DataFrame()
 
 def set_event_attendance(event_id, user_id, status):
     try:
@@ -396,11 +396,13 @@ else:
         st.session_state['logged_in_user'] = None
         st.rerun()
 
-    # DATEN LADEN
+    # BÜNDEL-LADEN: Alle Daten werden gecacht geladen. Keine N+1 Queries mehr im UI!
     children_df = get_children(user['user_id'])
     tasks_df = get_all_tasks()
     assign_df = get_task_assignments()
     events_df = get_all_events()
+    all_attendance_df = get_all_attendance()
+    all_users_df = get_all_users()
 
     # TEAM LOGIK FÜR FILTER
     my_teams = set()
@@ -410,19 +412,15 @@ else:
             if c.get('team') and c['team'] != "Kein Team": my_teams.update([t.strip() for t in c['team'].split(',')])
     
     def is_relevant(teams_str):
-        # Admins und Organisatoren sehen immer ALLE Teams in der Übersicht
         if user['rolle'] in ['Admin', 'Organisator']: 
             return True
-            
-        if pd.isna(teams_str) or not str(teams_str).strip(): return True # Allgemeine Termine
+        if pd.isna(teams_str) or not str(teams_str).strip(): return True
         return any(t.strip() in my_teams for t in str(teams_str).split(','))
 
-    # TABS AUFBAUEN
     tab_titles = ["🏆 Spieltage & Events", "📋 Freie Aufgaben", "📅 Kalender-Ansicht", "👨‍👩‍👧 Familie"]
     if user['rolle'] == 'Admin': tab_titles.append("👥 Admin")
     tabs = st.tabs(tab_titles)
 
-    # Session State für die Team-Navigation initialisieren
     if 'selected_event_team' not in st.session_state:
         st.session_state['selected_event_team'] = None
 
@@ -430,40 +428,34 @@ else:
     # TAB 1: SPIELTAGE & EVENTS
     # ----------------------------------------------------
     with tabs[0]:
-        st.write("Hier findest du organisierte Spieltage. Wähle eine Altersklasse/ein Team, um die Termine zu sehen.")
+        st.write("Wähle eine Altersklasse/ein Team, um die Termine zu sehen.")
         
         rel_events = events_df[events_df['betroffene_teams'].apply(is_relevant)] if not events_df.empty else pd.DataFrame()
         
-        # Admin-Optionen einmalig laden
+        # Admin Optionen schnell aus gecachtem DataFrame bauen (Keine Extra-Datenbankabfrage!)
         admin_options = {}
         if user['rolle'] in ['Admin', 'Organisator']:
-            try:
-                with engine.connect() as conn:
-                    all_u = pd.read_sql(text("SELECT user_id, name FROM users ORDER BY name"), conn)
-                    admin_options = {row['user_id']: f"Admin-Zuweisung: {row['name']}" for _, row in all_u.iterrows()}
-            except: pass
+            if not all_users_df.empty:
+                admin_options = {row['user_id']: f"Admin-Zuweisung: {row['name']}" for _, row in all_users_df.iterrows()}
             
-        # Helfer-Funktion zum Zeichnen der Events, damit wir Code nicht doppeln
         def render_event_list(events_to_show):
             for _, ev in events_to_show.iterrows():
                 ev_id = ev['event_id']
                 with st.expander(f"🏐 {ev['titel']} ({ev['start_zeit']})", expanded=False):
                     st.write(f"📍 **Ort:** {ev['ort']} | 👕 **Teams:** {ev['betroffene_teams']}")
                     
-                    # --- TEILNAHME (ATTENDANCE) ---
+                    # --- TEILNAHME (ATTENDANCE) - Ultraschnell aus gecachtem DataFrame gefiltert ---
                     st.markdown("#### 🏃‍♂️ Spieler-Teilnahme")
-                    attendance_df = get_event_attendance(ev_id)
+                    attendance_df = all_attendance_df[all_attendance_df['event_id'] == ev_id] if not all_attendance_df.empty else pd.DataFrame()
                     
                     if not attendance_df.empty:
                         dabei = attendance_df[attendance_df['status'] == 'dabei']['name'].tolist()
                         abgesagt = attendance_df[attendance_df['status'] == 'abgesagt']['name'].tolist()
                         
                         if dabei:
-                            dabei_list = "\n".join([f"- {name}" for name in dabei])
-                            st.success(f"✅ **Dabei ({len(dabei)}):**\n\n{dabei_list}")
+                            st.success(f"✅ **Dabei ({len(dabei)}):**\n" + "\n".join([f"- {name}" for name in dabei]))
                         if abgesagt:
-                            abgesagt_list = "\n".join([f"- {name}" for name in abgesagt])
-                            st.error(f"❌ **Abgesagt ({len(abgesagt)}):**\n\n{abgesagt_list}")
+                            st.error(f"❌ **Abgesagt ({len(abgesagt)}):**\n" + "\n".join([f"- {name}" for name in abgesagt]))
                     else:
                         st.info("Noch keine Rückmeldungen für diesen Spieltag.")
                     
@@ -475,8 +467,7 @@ else:
                     
                     if user['rolle'] in ['Admin', 'Organisator']:
                         for uid, uname in admin_options.items():
-                            if uid not in att_options:
-                                att_options[uid] = uname
+                            if uid not in att_options: att_options[uid] = uname
                                 
                     c1, c2, c3 = st.columns([2, 1, 1])
                     with c1:
@@ -491,9 +482,8 @@ else:
                             st.rerun()
                             
                     st.divider()
-                    # --- ENDE TEILNAHME ---
                     
-                    # Tasks für dieses Event laden
+                    # Tasks aus gecachtem DataFrame
                     ev_tasks = tasks_df[tasks_df['event_id'] == ev_id] if not tasks_df.empty else pd.DataFrame()
                     
                     st.markdown("#### Organisation & Aufgaben:")
@@ -506,9 +496,9 @@ else:
                             
                             tc1, tc2 = st.columns([3, 2])
                             with tc1:
-                                st.write(f"**{tsk['kategorie']}** ({cur_h}/{max_h} belegt)")
+                                st.write(f"**{tsk['kategorie']}**")
                                 st.caption(tsk['beschreibung'])
-                                if cur_h > 0: st.write("👥 " + ", ".join(t_assigns['assignee_name'].tolist()))
+                                st.write(f"👥 Belegt: {cur_h} / {max_h}. " + ", ".join(t_assigns['assignee_name'].tolist()))
                             with tc2:
                                 options = {user['user_id']: "Ich selbst"}
                                 if not children_df.empty:
@@ -532,57 +522,45 @@ else:
                     else:
                         st.info("Noch keine Aufgaben für dieses Event hinterlegt.")
                         
-                    # Neue Aufgabe ZU DIESEM EVENT hinzufügen
                     if user['rolle'] in ['Admin', 'Organisator']:
-                        st.markdown("➕ **Neuen Orga-Punkt für dieses Event erstellen**")
+                        st.markdown("➕ **Neuen Orga-Punkt erstellen**")
                         with st.form(f"form_ev_{ev_id}"):
-                            nk = st.text_input("Was wird gebraucht? (z.B. Kuchen, Fahrer, Spielerzusage)")
+                            nk = st.text_input("Was wird gebraucht?")
                             nb = st.text_area("Details")
                             nm = st.number_input("Anzahl Personen", min_value=1, value=1)
-                            if st.form_submit_button("Zum Event hinzufügen"):
+                            if st.form_submit_button("Hinzufügen"):
                                 if nk:
                                     create_task(nk, nb, nm, user['user_id'], ev['start_zeit'], ev['ende_zeit'], ev['betroffene_teams'], event_id=ev_id)
                                     st.rerun()
                                     
-                    # Event löschen
                     if user['rolle'] == 'Admin':
                         if st.button("🚨 Komplettes Event löschen", key=f"del_event_{ev_id}"):
                             delete_event(ev_id); st.rerun()
 
         if not rel_events.empty:
             if st.session_state['selected_event_team'] is None:
-                # --- KACHEL-ANSICHT ---
                 available_teams = set()
                 for _, ev in rel_events.iterrows():
-                    if pd.notna(ev['betroffene_teams']):
-                        available_teams.update([t.strip() for t in str(ev['betroffene_teams']).split(',')])
-                
+                    if pd.notna(ev['betroffene_teams']): available_teams.update([t.strip() for t in str(ev['betroffene_teams']).split(',')])
                 valid_teams = sorted(list(available_teams))
                 
                 if valid_teams:
-                    st.markdown("### Wähle eine Altersklasse / ein Team:")
-                    # Kacheln als Buttons in 3er Spalten
                     cols = st.columns(3)
                     for i, t_name in enumerate(valid_teams):
                         with cols[i % 3]:
                             if st.button(f"🏐 {t_name}", key=f"tile_{t_name}", use_container_width=True):
                                 st.session_state['selected_event_team'] = t_name
                                 st.rerun()
-                else:
-                    st.info("Keine spezifischen Teams in den Spieltagen hinterlegt.")
+                else: st.info("Keine spezifischen Teams in den Spieltagen hinterlegt.")
             else:
-                # --- DETAIL-ANSICHT EINES TEAMS ---
                 sel_team = st.session_state['selected_event_team']
-                
                 col_back, col_title = st.columns([1, 4])
                 with col_back:
                     if st.button("🔙 Zurück", use_container_width=True):
                         st.session_state['selected_event_team'] = None
                         st.rerun()
-                with col_title:
-                    st.markdown(f"### Termine für: **{sel_team}**")
+                with col_title: st.markdown(f"### Termine für: **{sel_team}**")
                 
-                # Nur Events filtern, die dieses Team enthalten
                 def is_selected_team(teams_str):
                     if pd.isna(teams_str): return False
                     return sel_team in [t.strip() for t in str(teams_str).split(',')]
@@ -590,48 +568,33 @@ else:
                 team_events = rel_events[rel_events['betroffene_teams'].apply(is_selected_team)].copy()
                 
                 if not team_events.empty:
-                    # Datum parsen, um zwischen "Nächstes" und "Kommende" zu unterscheiden
-                    team_events['sort_date'] = pd.to_datetime(
-                        team_events['start_zeit'].astype(str).str.replace(' Uhr', ''), 
-                        dayfirst=True, 
-                        errors='coerce'
-                    )
-                    
+                    team_events['sort_date'] = pd.to_datetime(team_events['start_zeit'].astype(str).str.replace(' Uhr', ''), dayfirst=True, errors='coerce')
                     now = pd.Timestamp(datetime.datetime.now())
-                    
-                    # Aufteilen in Zukunft, Vergangenheit, etc.
                     future_events = team_events[team_events['sort_date'] >= now].sort_values('sort_date')
                     past_events = team_events[team_events['sort_date'] < now].sort_values('sort_date', ascending=False)
                     unparsed_events = team_events[team_events['sort_date'].isna()]
                     
                     if not future_events.empty:
-                        # Findet als nächstes statt (am ersten verfügbaren Datum)
                         next_date = future_events.iloc[0]['sort_date'].date()
                         next_events = future_events[future_events['sort_date'].dt.date == next_date]
                         upcoming_events = future_events[future_events['sort_date'].dt.date > next_date]
                         
                         st.markdown("#### 🚨 Findet als nächstes statt")
                         render_event_list(next_events)
-                        
                         if not upcoming_events.empty:
                             st.markdown("#### 📅 Kommende Termine")
                             render_event_list(upcoming_events)
-                    else:
-                        st.success("Keine anstehenden Termine in der Zukunft!")
+                    else: st.success("Keine anstehenden Termine in der Zukunft!")
                         
                     if not past_events.empty or not unparsed_events.empty:
                         with st.expander("🕰️ Vergangene / Unbestimmte Termine"):
-                            if not past_events.empty:
-                                render_event_list(past_events)
-                            if not unparsed_events.empty:
-                                render_event_list(unparsed_events)
-                else:
-                    st.info("Für dieses Team wurden noch keine Spieltage angelegt.")
-        else:
-            st.info("Keine Spieltage für deine Teams gefunden.")
+                            if not past_events.empty: render_event_list(past_events)
+                            if not unparsed_events.empty: render_event_list(unparsed_events)
+                else: st.info("Für dieses Team wurden noch keine Spieltage angelegt.")
+        else: st.info("Keine Spieltage für deine Teams gefunden.")
 
     # ----------------------------------------------------
-    # TAB 2: FREIE AUFGABEN (STANDALONE)
+    # TAB 2: FREIE AUFGABEN
     # ----------------------------------------------------
     with tabs[1]:
         if user['rolle'] in ['Admin', 'Organisator']:
@@ -649,7 +612,6 @@ else:
                         st.rerun()
                         
         st.write("")
-        # Zeige nur Tasks, die NICHT an ein Event gekoppelt sind
         free_tasks = tasks_df[tasks_df['event_id'].isna()] if not tasks_df.empty else pd.DataFrame()
         
         if not free_tasks.empty:
@@ -665,7 +627,7 @@ else:
                         if pd.notna(row.get('start_zeit')): st.write(f"🗓️ {row['start_zeit']}")
                         if pd.notna(row.get('betroffene_teams')) and row['betroffene_teams']: st.write(f"👕 Teams: {row['betroffene_teams']}")
                         st.caption(row['beschreibung'])
-                        st.write(f"👥 {cur_h}/{max_h} belegt. " + ", ".join(t_assigns['assignee_name'].tolist()))
+                        st.write(f"👥 Belegt: {cur_h}/{max_h}. " + ", ".join(t_assigns['assignee_name'].tolist()))
                     with col2:
                         options = {user['user_id']: "Ich selbst"}
                         if not children_df.empty:
@@ -690,30 +652,19 @@ else:
     # ----------------------------------------------------
     with tabs[2]:
         st.write("Chronologische Übersicht der Termine (Events & Aufgaben).")
-        
-        # Dropdown für den Team-Filter im Kalender
         filter_optionen = ["Alle meine Teams"] + TEAM_LISTE
         selected_cal_team = st.selectbox("Kalender filtern nach Team:", filter_optionen)
         
-        # Eigene Filter-Logik für den Kalender
         def cal_is_relevant(teams_str):
-            # Wenn "Alle" ausgewählt ist, greift die normale Logik (zeigt eigene Teams + allgemeine Termine)
-            if selected_cal_team == "Alle meine Teams":
-                return is_relevant(teams_str)
-            # Wenn ein festes Team ausgewählt wurde, blende allgemeine Termine aus und suche exakt nach dem Team
+            if selected_cal_team == "Alle meine Teams": return is_relevant(teams_str)
             else:
-                if pd.isna(teams_str) or not str(teams_str).strip():
-                    return False
+                if pd.isna(teams_str) or not str(teams_str).strip(): return False
                 return selected_cal_team in [t.strip() for t in str(teams_str).split(',')]
 
         cal_data = []
-        
-        # Events in Kalender packen
         if not events_df.empty:
             for _, ev in events_df[events_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
                 cal_data.append({"Datum": ev['start_zeit'], "Typ": "🏆 Spieltag", "Titel": ev['titel'], "Teams": ev['betroffene_teams']})
-        
-        # Allgemeine Tasks in Kalender packen
         if not tasks_df.empty:
             for _, tk in tasks_df[tasks_df['event_id'].isna() & tasks_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
                 if pd.notna(tk.get('start_zeit')):
@@ -765,11 +716,11 @@ else:
                     
             st.divider()
             st.subheader("👥 User-Verwaltung")
-            with engine.connect() as conn:
-                df_u = pd.read_sql("SELECT user_id, name, email, rolle, team FROM users", conn)
-            st.dataframe(df_u, use_container_width=True)
+            
+            # Nutzt jetzt den gecachten DataFrame (keine Extra-Datenbankabfrage)
+            st.dataframe(all_users_df, use_container_width=True)
             with st.form("del_u"):
-                opts = {r['user_id']: f"{r['name']} ({r['rolle']})" for _, r in df_u.iterrows()}
+                opts = {r['user_id']: f"{r['name']} ({r['rolle']})" for _, r in all_users_df.iterrows()}
                 d_id = st.selectbox("Löschen:", list(opts.keys()), format_func=lambda x: opts[x])
                 if st.form_submit_button("User Löschen") and d_id != user['user_id']:
                     delete_user(d_id); st.rerun()
