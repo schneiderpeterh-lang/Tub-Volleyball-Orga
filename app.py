@@ -456,9 +456,11 @@ else:
                         abgesagt = attendance_df[attendance_df['status'] == 'abgesagt']['name'].tolist()
                         
                         if dabei:
-                            st.success(f"✅ **Dabei ({len(dabei)}):** " + ", ".join(dabei))
+                            dabei_list = "\n".join([f"- {name}" for name in dabei])
+                            st.success(f"✅ **Dabei ({len(dabei)}):**\n\n{dabei_list}")
                         if abgesagt:
-                            st.error(f"❌ **Abgesagt ({len(abgesagt)}):** " + ", ".join(abgesagt))
+                            abgesagt_list = "\n".join([f"- {name}" for name in abgesagt])
+                            st.error(f"❌ **Abgesagt ({len(abgesagt)}):**\n\n{abgesagt_list}")
                     else:
                         st.info("Noch keine Rückmeldungen für diesen Spieltag.")
                     
