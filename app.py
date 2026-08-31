@@ -365,18 +365,23 @@ else:
     if user['rolle'] == 'Admin': tab_titles.append("👥 Admin")
     tabs = st.tabs(tab_titles)
 
+    # Session State für die Team-Navigation initialisieren
+    if 'selected_event_team' not in st.session_state:
+        st.session_state['selected_event_team'] = None
+
     # ----------------------------------------------------
     # TAB 1: SPIELTAGE & EVENTS (NEU)
     # ----------------------------------------------------
     with tabs[0]:
-        st.write("Hier findest du organisierte Spieltage. Klicke auf ein Event, um Teilnahmen oder Catering einzutragen.")
+        st.write("Hier findest du organisierte Spieltage. Wähle eine Altersklasse/ein Team, um die Termine zu sehen.")
         
         rel_events = events_df[events_df['betroffene_teams'].apply(is_relevant)] if not events_df.empty else pd.DataFrame()
         
-        if not rel_events.empty:
-            for _, ev in rel_events.iterrows():
+        # Helfer-Funktion zum Zeichnen der Events, damit wir Code nicht doppeln
+        def render_event_list(events_to_show):
+            for _, ev in events_to_show.iterrows():
                 ev_id = ev['event_id']
-                with st.expander(f"🏐 {ev['titel']} ({ev['start_zeit']})"):
+                with st.expander(f"🏐 {ev['titel']} ({ev['start_zeit']})", expanded=False):
                     st.write(f"📍 **Ort:** {ev['ort']} | 👕 **Teams:** {ev['betroffene_teams']}")
                     
                     # Tasks für dieses Event laden
@@ -411,8 +416,8 @@ else:
                                     else: st.success("✅ Du bist eingetragen.")
                                 else: st.success("✅ Voll belegt.")
                                 
-                                if user['rolle'] == 'Admin' or tsk.get('erstellt_von') == user['user_id']:
-                                    if st.button("🗑️", key=f"del_ev_{t_id}"): 
+                                if user['rolle'] in ['Admin', 'Organisator'] or tsk.get('erstellt_von') == user['user_id']:
+                                    if st.button("🗑️ Löschen", key=f"del_ev_{t_id}"): 
                                         delete_task(t_id); st.rerun()
                             st.divider()
                     else:
@@ -434,6 +439,85 @@ else:
                     if user['rolle'] == 'Admin':
                         if st.button("🚨 Komplettes Event löschen", key=f"del_event_{ev_id}"):
                             delete_event(ev_id); st.rerun()
+
+        if not rel_events.empty:
+            if st.session_state['selected_event_team'] is None:
+                # --- KACHEL-ANSICHT ---
+                available_teams = set()
+                for _, ev in rel_events.iterrows():
+                    if pd.notna(ev['betroffene_teams']):
+                        available_teams.update([t.strip() for t in str(ev['betroffene_teams']).split(',')])
+                
+                valid_teams = sorted(list(available_teams))
+                
+                if valid_teams:
+                    st.markdown("### Wähle eine Altersklasse / ein Team:")
+                    # Kacheln als Buttons in 3er Spalten
+                    cols = st.columns(3)
+                    for i, t_name in enumerate(valid_teams):
+                        with cols[i % 3]:
+                            if st.button(f"🏐 {t_name}", key=f"tile_{t_name}", use_container_width=True):
+                                st.session_state['selected_event_team'] = t_name
+                                st.rerun()
+                else:
+                    st.info("Keine spezifischen Teams in den Spieltagen hinterlegt.")
+            else:
+                # --- DETAIL-ANSICHT EINES TEAMS ---
+                sel_team = st.session_state['selected_event_team']
+                
+                col_back, col_title = st.columns([1, 4])
+                with col_back:
+                    if st.button("🔙 Zurück", use_container_width=True):
+                        st.session_state['selected_event_team'] = None
+                        st.rerun()
+                with col_title:
+                    st.markdown(f"### Termine für: **{sel_team}**")
+                
+                # Nur Events filtern, die dieses Team enthalten
+                def is_selected_team(teams_str):
+                    if pd.isna(teams_str): return False
+                    return sel_team in [t.strip() for t in str(teams_str).split(',')]
+                    
+                team_events = rel_events[rel_events['betroffene_teams'].apply(is_selected_team)].copy()
+                
+                if not team_events.empty:
+                    # Datum parsen, um zwischen "Nächstes" und "Kommende" zu unterscheiden
+                    team_events['sort_date'] = pd.to_datetime(
+                        team_events['start_zeit'].astype(str).str.replace(' Uhr', ''), 
+                        dayfirst=True, 
+                        errors='coerce'
+                    )
+                    
+                    now = pd.Timestamp(datetime.datetime.now())
+                    
+                    # Aufteilen in Zukunft, Vergangenheit, etc.
+                    future_events = team_events[team_events['sort_date'] >= now].sort_values('sort_date')
+                    past_events = team_events[team_events['sort_date'] < now].sort_values('sort_date', ascending=False)
+                    unparsed_events = team_events[team_events['sort_date'].isna()]
+                    
+                    if not future_events.empty:
+                        # Findet als nächstes statt (am ersten verfügbaren Datum)
+                        next_date = future_events.iloc[0]['sort_date'].date()
+                        next_events = future_events[future_events['sort_date'].dt.date == next_date]
+                        upcoming_events = future_events[future_events['sort_date'].dt.date > next_date]
+                        
+                        st.markdown("#### 🚨 Findet als nächstes statt")
+                        render_event_list(next_events)
+                        
+                        if not upcoming_events.empty:
+                            st.markdown("#### 📅 Kommende Termine")
+                            render_event_list(upcoming_events)
+                    else:
+                        st.success("Keine anstehenden Termine in der Zukunft!")
+                        
+                    if not past_events.empty or not unparsed_events.empty:
+                        with st.expander("🕰️ Vergangene / Unbestimmte Termine"):
+                            if not past_events.empty:
+                                render_event_list(past_events)
+                            if not unparsed_events.empty:
+                                render_event_list(unparsed_events)
+                else:
+                    st.info("Für dieses Team wurden noch keine Spieltage angelegt.")
         else:
             st.info("Keine Spieltage für deine Teams gefunden.")
 
