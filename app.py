@@ -284,11 +284,35 @@ def delete_task(task_id):
 def delete_event(event_id):
     try:
         with engine.begin() as conn:
-            # Lösche erst alle Tasks, die an dieses Event gekoppelt sind
+            # Lösche erst alle Tasks und Teilnahmen, die an dieses Event gekoppelt sind
             conn.execute(text("DELETE FROM tasks WHERE event_id = :e"), {"e": event_id})
+            conn.execute(text("DELETE FROM event_attendance WHERE event_id = :e"), {"e": event_id})
             conn.execute(text("DELETE FROM events WHERE event_id = :e"), {"e": event_id})
         return True, "Spieltag inkl. Aufgaben gelöscht!"
     except Exception as e: return False, str(e)
+
+def get_event_attendance(event_id):
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(text("""
+                SELECT ea.user_id, ea.status, u.name 
+                FROM event_attendance ea
+                JOIN users u ON ea.user_id = u.user_id
+                WHERE ea.event_id = :e
+            """), conn, params={"e": event_id})
+    except: return pd.DataFrame()
+
+def set_event_attendance(event_id, user_id, status):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO event_attendance (event_id, user_id, status)
+                VALUES (:e, :u, :s)
+                ON CONFLICT (event_id, user_id) 
+                DO UPDATE SET status = EXCLUDED.status
+            """), {"e": event_id, "u": user_id, "s": status})
+        return True
+    except Exception as e: return False
 
 def accept_task(task_id, user_id):
     try:
