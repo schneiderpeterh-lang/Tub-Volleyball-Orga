@@ -4,4 +4,4 @@ sqlalchemy
 psycopg2-binary
 dnspython
 icalendar
-streamlit-cookies-manager
+
