@@ -496,17 +496,33 @@ else:
     # TAB 3: KALENDER
     # ----------------------------------------------------
     with tabs[2]:
-        st.write("Chronologische Übersicht aller relevanten Termine (Events & Aufgaben).")
+        st.write("Chronologische Übersicht der Termine (Events & Aufgaben).")
+        
+        # NEU: Dropdown für den Team-Filter im Kalender
+        filter_optionen = ["Alle meine Teams"] + TEAM_LISTE
+        selected_cal_team = st.selectbox("Kalender filtern nach Team:", filter_optionen)
+        
+        # Eigene Filter-Logik für den Kalender
+        def cal_is_relevant(teams_str):
+            # Wenn "Alle" ausgewählt ist, greift die normale Logik (zeigt eigene Teams + allgemeine Termine)
+            if selected_cal_team == "Alle meine Teams":
+                return is_relevant(teams_str)
+            # Wenn ein festes Team ausgewählt wurde, blende allgemeine Termine aus und suche exakt nach dem Team
+            else:
+                if pd.isna(teams_str) or not str(teams_str).strip():
+                    return False
+                return selected_cal_team in [t.strip() for t in str(teams_str).split(',')]
+
         cal_data = []
         
         # Events in Kalender packen
         if not events_df.empty:
-            for _, ev in events_df[events_df['betroffene_teams'].apply(is_relevant)].iterrows():
+            for _, ev in events_df[events_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
                 cal_data.append({"Datum": ev['start_zeit'], "Typ": "🏆 Spieltag", "Titel": ev['titel'], "Teams": ev['betroffene_teams']})
         
         # Allgemeine Tasks in Kalender packen
         if not tasks_df.empty:
-            for _, tk in tasks_df[tasks_df['event_id'].isna() & tasks_df['betroffene_teams'].apply(is_relevant)].iterrows():
+            for _, tk in tasks_df[tasks_df['event_id'].isna() & tasks_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
                 if pd.notna(tk.get('start_zeit')):
                     cal_data.append({"Datum": tk['start_zeit'], "Typ": "📋 Aufgabe", "Titel": tk['kategorie'], "Teams": tk['betroffene_teams']})
                     
