@@ -115,7 +115,7 @@ def update_db_schema(_engine):
             );
         """))
 
-        # NEU: Tabelle für die Spieler-Teilnahme an Events
+        # Tabelle für die Spieler-Teilnahme an Events
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS event_attendance (
                 event_id INTEGER REFERENCES events(event_id) ON DELETE CASCADE,
@@ -353,7 +353,6 @@ def accept_task(task_id, user_id):
         return True, "Übernommen!"
     except Exception as e: return False, str(e)
 
-
 # ==========================================
 # 5. UI COMPONENTS
 # ==========================================
@@ -411,6 +410,10 @@ else:
             if c.get('team') and c['team'] != "Kein Team": my_teams.update([t.strip() for t in c['team'].split(',')])
     
     def is_relevant(teams_str):
+        # Admins und Organisatoren sehen immer ALLE Teams in der Übersicht
+        if user['rolle'] in ['Admin', 'Organisator']: 
+            return True
+            
         if pd.isna(teams_str) or not str(teams_str).strip(): return True # Allgemeine Termine
         return any(t.strip() in my_teams for t in str(teams_str).split(','))
 
@@ -424,7 +427,7 @@ else:
         st.session_state['selected_event_team'] = None
 
     # ----------------------------------------------------
-    # TAB 1: SPIELTAGE & EVENTS (NEU)
+    # TAB 1: SPIELTAGE & EVENTS
     # ----------------------------------------------------
     with tabs[0]:
         st.write("Hier findest du organisierte Spieltage. Wähle eine Altersklasse/ein Team, um die Termine zu sehen.")
@@ -447,7 +450,7 @@ else:
                 with st.expander(f"🏐 {ev['titel']} ({ev['start_zeit']})", expanded=False):
                     st.write(f"📍 **Ort:** {ev['ort']} | 👕 **Teams:** {ev['betroffene_teams']}")
                     
-                    # --- NEU: TEILNAHME (ATTENDANCE) ---
+                    # --- TEILNAHME (ATTENDANCE) ---
                     st.markdown("#### 🏃‍♂️ Spieler-Teilnahme")
                     attendance_df = get_event_attendance(ev_id)
                     
@@ -688,7 +691,7 @@ else:
     with tabs[2]:
         st.write("Chronologische Übersicht der Termine (Events & Aufgaben).")
         
-        # NEU: Dropdown für den Team-Filter im Kalender
+        # Dropdown für den Team-Filter im Kalender
         filter_optionen = ["Alle meine Teams"] + TEAM_LISTE
         selected_cal_team = st.selectbox("Kalender filtern nach Team:", filter_optionen)
         
