@@ -8,13 +8,6 @@ import uuid
 import io
 from sqlalchemy import create_engine, text
 
-# Versuch, benötigte Pakete zu importieren (mit hilfreicher Fehlermeldung bei Fehlen)
-try:
-    from streamlit_cookies_manager import EncryptedCookieManager
-except ImportError:
-    st.error("📦 **Fehlendes Paket!** Bitte füge `streamlit-cookies-manager` zu deiner `requirements.txt` auf GitHub hinzu.")
-    st.stop()
-
 try:
     import icalendar
 except ImportError:
@@ -35,10 +28,6 @@ try:
     )
 except Exception as e:
     st.error(f"Datenbankfehler beim Verbindungsaufbau: {e}")
-    st.stop()
-
-cookies = EncryptedCookieManager(prefix="tub_orga", password=DB_URL)
-if not cookies.ready():
     st.stop()
 
 # ==========================================
@@ -318,9 +307,7 @@ st.title("🏐 TuB Helfer-Orga")
 TEAM_LISTE = ["U12", "U13", "U14", "U16", "U18", "U20", "Herren 1", "Herren 2", "Herren 3", "Herren 4"]
 
 if 'logged_in_user' not in st.session_state:
-    saved_user_id = cookies.get("logged_in_user_id")
-    if saved_user_id: st.session_state['logged_in_user'] = get_user_by_id(int(saved_user_id))
-    else: st.session_state['logged_in_user'] = None
+    st.session_state['logged_in_user'] = None
 
 if get_user_count() == 0:
     st.warning("⚠️ Keine Benutzer in der Datenbank gefunden. Richte den Admin ein:")
@@ -337,8 +324,6 @@ elif st.session_state['logged_in_user'] is None:
             if st.form_submit_button("Einloggen"):
                 if user:
                     st.session_state['logged_in_user'] = user
-                    cookies["logged_in_user_id"] = str(user['user_id'])
-                    cookies.save()
                     st.rerun()
                 else: st.error("Zugangsdaten ungültig.")
     with t_reg:
@@ -355,9 +340,6 @@ else:
     user = st.session_state['logged_in_user']
     st.write(f"Willkommen zurück, **{user['name']}** - {user['rolle']}!")
     if st.button("🚪 Ausloggen"):
-        if "logged_in_user_id" in cookies:
-            del cookies["logged_in_user_id"]
-            cookies.save()
         st.session_state['logged_in_user'] = None
         st.rerun()
 
