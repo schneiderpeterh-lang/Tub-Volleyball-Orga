@@ -5,40 +5,47 @@ import hashlib
 import secrets
 import traceback
 import uuid
+import io
 from sqlalchemy import create_engine, text
+
+# Versuch, benötigte Pakete zu importieren (mit hilfreicher Fehlermeldung bei Fehlen)
+try:
+    from streamlit_cookies_manager import EncryptedCookieManager
+except ImportError:
+    st.error("📦 **Fehlendes Paket!** Bitte füge `streamlit-cookies-manager` zu deiner `requirements.txt` auf GitHub hinzu.")
+    st.stop()
+
+try:
+    import icalendar
+except ImportError:
+    st.error("📦 **Fehlendes Paket!** Bitte füge `icalendar` zu deiner `requirements.txt` auf GitHub hinzu, um den Kalender-Import zu nutzen.")
+    st.stop()
 
 # ==========================================
 # 1. KONFIGURATION & DATENBANK-VERBINDUNG
 # ==========================================
 st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide")
 
-# Verbindung aufbauen (Daten kommen sicher aus den Streamlit Secrets)
 try:
     DB_URL = st.secrets["DB_URL"]
-    
-    # Sicherheits-Fix: SQLAlchemy 1.4+ erfordert 'postgresql://' statt 'postgres://'
-    if DB_URL.startswith("postgres://"):
-        DB_URL = DB_URL.replace("postgres://", "postgresql://", 1)
-        
     engine = create_engine(
         DB_URL, 
-        connect_args={
-            "sslmode": "require",
-            "connect_timeout": 15
-        },
+        connect_args={"sslmode": "require", "connect_timeout": 15},
         pool_pre_ping=True
     )
 except Exception as e:
     st.error(f"Datenbankfehler beim Verbindungsaufbau: {e}")
     st.stop()
 
+cookies = EncryptedCookieManager(prefix="tub_orga", password=DB_URL)
+if not cookies.ready():
+    st.stop()
+
 # ==========================================
 # 2. DATENBANK-TABELLEN INITIALISIEREN
 # ==========================================
 def update_db_schema(engine):
-    """Initialisiert alle notwendigen Tabellen und Spalten in PostgreSQL, falls sie fehlen."""
     with engine.begin() as conn:
-        # User Tabelle
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id SERIAL PRIMARY KEY,
@@ -46,36 +53,64 @@ def update_db_schema(engine):
                 email TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 rolle TEXT NOT NULL,
-                dsgvo_akzeptiert INTEGER DEFAULT 0,
-                parent_id INTEGER,
-                team TEXT
+                dsgvo_akzeptiert INTEGER DEFAULT 0
             );
         """))
         
-        # Parent-Child Verknüpfung
+        try:
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES users(user_id);"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS team TEXT;"))
+        except Exception: pass 
+            
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS teams (
+                team_id SERIAL PRIMARY KEY,
+                team_name TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS events (
+                event_id SERIAL PRIMARY KEY,
+                team_id INTEGER REFERENCES teams(team_id),
+                datum_zeit TEXT,
+                ort TEXT,
+                event_typ TEXT
+            );
+            CREATE TABLE IF NOT EXISTS tasks (
+                task_id SERIAL PRIMARY KEY,
+                event_id INTEGER REFERENCES events(event_id),
+                kategorie TEXT,
+                beschreibung TEXT,
+                punkte_wert INTEGER,
+                zugewiesen_an INTEGER REFERENCES users(user_id),
+                tausch_angefragt INTEGER DEFAULT 0
+            );
+        """))
+        
+        # Updates für Tasks
+        try:
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS start_zeit TEXT;"))
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ende_zeit TEXT;"))
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS betroffene_teams TEXT;"))
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS max_helfer INTEGER DEFAULT 1;"))
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS erstellt_von INTEGER REFERENCES users(user_id);"))
+        except Exception: pass
+
+        # Updates für Events (um ICS Daten sauber zu speichern)
+        try:
+            conn.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS titel TEXT;"))
+            conn.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS start_zeit TEXT;"))
+            conn.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS ende_zeit TEXT;"))
+            conn.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS betroffene_teams TEXT;"))
+        except Exception: pass
+            
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS parent_child (
-                parent_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
-                child_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+                parent_id INTEGER REFERENCES users(user_id),
+                child_id INTEGER REFERENCES users(user_id),
                 PRIMARY KEY (parent_id, child_id)
             );
         """))
-
-        # Tasks Tabelle (Aufgaben)
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS tasks (
-                task_id SERIAL PRIMARY KEY,
-                kategorie TEXT,
-                beschreibung TEXT,
-                start_zeit TEXT,
-                ende_zeit TEXT,
-                betroffene_teams TEXT,
-                erstellt_von INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
-                max_helfer INTEGER DEFAULT 1
-            );
-        """))
-
-        # Task Assignments (Wer hat die Aufgabe übernommen?)
+        
+        # Task Assignments (Mehrere Helfer pro Aufgabe)
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS task_assignments (
                 assignment_id SERIAL PRIMARY KEY,
@@ -83,41 +118,15 @@ def update_db_schema(engine):
                 user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE
             );
         """))
-        
-        # Sicherheits-Updates: Fehlende Spalten hinzufügen (falls alte Tabelle existiert)
-        try: conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS parent_id INTEGER;"))
-        except: pass 
-        try: conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS team TEXT;"))
-        except: pass 
-        try: conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS start_zeit TEXT;"))
-        except: pass
-        try: conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ende_zeit TEXT;"))
-        except: pass
-        try: conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS betroffene_teams TEXT;"))
-        except: pass
-        try: conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS erstellt_von INTEGER REFERENCES users(user_id) ON DELETE SET NULL;"))
-        except: pass
-        try: conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS max_helfer INTEGER DEFAULT 1;"))
-        except: pass
 
-        # Daten-Migration alter Parent-Struktur
-        try:
-            conn.execute(text("""
-                INSERT INTO parent_child (parent_id, child_id)
-                SELECT parent_id, user_id FROM users WHERE parent_id IS NOT NULL
-                ON CONFLICT DO NOTHING;
-            """))
-        except: pass
-
-# Schema beim Start prüfen/anlegen
 try:
     update_db_schema(engine)
 except Exception as e:
     st.error(f"Fehler bei der Tabellen-Initialisierung: {e}")
-
+    st.stop()
 
 # ==========================================
-# 3. KRYPTOGRAFIE & PASSWORT-SCHUTZ
+# 3. KRYPTOGRAFIE & USER-VERWALTUNG
 # ==========================================
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
@@ -125,49 +134,50 @@ def hash_password(password: str) -> str:
     return f"{salt}${hash_obj.hex()}"
 
 def verify_password(password: str, hashed_password: str) -> bool:
-    if "$" not in hashed_password: 
-        return password == hashed_password
+    if "$" not in hashed_password: return password == hashed_password
     salt, hash_hex = hashed_password.split('$')
     hash_obj = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
     return hash_obj.hex() == hash_hex
 
-
-# ==========================================
-# 4. USER-VERWALTUNG & SQL-AKTIONEN
-# ==========================================
 def get_user_count():
     try:
-        with engine.connect() as conn:
-            return conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
+        with engine.connect() as conn: return conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
     except: return 0
 
 def create_initial_admin(name, email, password):
     hashed = hash_password(password)
     try:
         with engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team)
-                VALUES (:name, :email, :hash, 'Admin', 1, 'Kein Team')
-            """), {"name": name, "email": email, "hash": hashed})
+            conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, :h, 'Admin', 1, 'Kein Team')"),
+                {"n": name, "e": email, "h": hashed})
         return True
-    except Exception as e:
-        st.error(f"Fehler beim Erstellen des Admins: {e}")
-        return False
+    except: return False
 
 def register_new_user(name, email, password, rolle, team_list):
     hashed = hash_password(password)
     team_str = ", ".join(team_list) if team_list else "Kein Team"
     try:
         with engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team)
-                VALUES (:name, :email, :hash, :rolle, 1, :team)
-            """), {"name": name, "email": email, "hash": hashed, "rolle": rolle, "team": team_str})
-        return True, "Erfolgreich registriert! Du kannst dich nun im linken Tab einloggen."
+            conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, :h, :r, 1, :t)"),
+                {"n": name, "e": email, "h": hashed, "r": rolle, "t": team_str})
+        return True, "Erfolgreich registriert!"
     except Exception as e:
-        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
-            return False, "Diese E-Mail-Adresse ist bereits registriert!"
-        return False, f"Fehler bei der Registrierung: {e}"
+        if "unique" in str(e).lower(): return False, "E-Mail bereits registriert!"
+        return False, str(e)
+
+def authenticate(email, password):
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT * FROM users WHERE email = :email AND rolle != 'Kind'"), {"email": email}).fetchone()
+        if result and verify_password(password, result.password_hash): return dict(result._mapping)
+    return None
+
+def get_user_by_id(user_id):
+    try:
+        with engine.connect() as conn:
+            res = conn.execute(text("SELECT * FROM users WHERE user_id = :id AND rolle != 'Kind'"), {"id": user_id}).fetchone()
+            if res: return dict(res._mapping)
+    except: pass
+    return None
 
 def add_child(parent_id, child_name, child_team_list):
     dummy_email = f"kind_{uuid.uuid4().hex[:8]}@tub.lokal"
@@ -175,41 +185,28 @@ def add_child(parent_id, child_name, child_team_list):
     team_str = ", ".join(child_team_list) if child_team_list else "Kein Team"
     try:
         with engine.begin() as conn:
-            result = conn.execute(text("""
-                INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, parent_id, team)
-                VALUES (:name, :email, :hash, 'Kind', 1, :parent_id, :team) RETURNING user_id
-            """), {"name": child_name, "email": dummy_email, "hash": dummy_pass, "parent_id": parent_id, "team": team_str})
-            new_child_id = result.scalar()
-            conn.execute(text("INSERT INTO parent_child (parent_id, child_id) VALUES (:p, :c) ON CONFLICT DO NOTHING"),
-                         {"p": parent_id, "c": new_child_id})
+            res = conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, parent_id, team) VALUES (:n, :e, :h, 'Kind', 1, :p, :t) RETURNING user_id"),
+                {"n": child_name, "e": dummy_email, "h": dummy_pass, "p": parent_id, "t": team_str})
+            conn.execute(text("INSERT INTO parent_child (parent_id, child_id) VALUES (:p, :c) ON CONFLICT DO NOTHING"), {"p": parent_id, "c": res.scalar()})
         return True, f"{child_name} erfolgreich hinzugefügt!"
-    except Exception as e:
-        return False, f"Fehler beim Hinzufügen: {e}"
+    except Exception as e: return False, str(e)
 
 def link_existing_child(parent_id, child_id):
     try:
         with engine.begin() as conn:
-            conn.execute(text("INSERT INTO parent_child (parent_id, child_id) VALUES (:p, :c) ON CONFLICT DO NOTHING"),
-                         {"p": parent_id, "c": child_id})
-        return True, "Kind erfolgreich verknüpft!"
-    except Exception as e:
-        return False, f"Fehler bei der Verknüpfung: {e}"
+            conn.execute(text("INSERT INTO parent_child (parent_id, child_id) VALUES (:p, :c) ON CONFLICT DO NOTHING"), {"p": parent_id, "c": child_id})
+        return True, "Verknüpft!"
+    except: return False, "Fehler!"
 
 def get_children(parent_id):
     try:
         with engine.connect() as conn:
-            return pd.read_sql(text("""
-                SELECT DISTINCT u.user_id, u.name, u.team 
-                FROM users u 
-                LEFT JOIN parent_child pc ON u.user_id = pc.child_id
-                WHERE u.parent_id = :parent_id OR pc.parent_id = :parent_id
-            """), conn, params={"parent_id": parent_id})
+            return pd.read_sql(text("SELECT DISTINCT u.user_id, u.name, u.team FROM users u LEFT JOIN parent_child pc ON u.user_id = pc.child_id WHERE u.parent_id = :p OR pc.parent_id = :p"), conn, params={"p": parent_id})
     except: return pd.DataFrame()
 
 def get_all_children_in_db():
     try:
-        with engine.connect() as conn:
-            return pd.read_sql(text("SELECT user_id, name, team FROM users WHERE rolle = 'Kind' ORDER BY name"), conn)
+        with engine.connect() as conn: return pd.read_sql(text("SELECT user_id, name, team FROM users WHERE rolle = 'Kind' ORDER BY name"), conn)
     except: return pd.DataFrame()
 
 def delete_user(user_id):
@@ -219,350 +216,369 @@ def delete_user(user_id):
             conn.execute(text("UPDATE users SET parent_id = NULL WHERE parent_id = :id"), {"id": user_id})
             conn.execute(text("DELETE FROM task_assignments WHERE user_id = :id"), {"id": user_id})
             conn.execute(text("DELETE FROM users WHERE user_id = :id"), {"id": user_id})
-        return True, "Account erfolgreich gelöscht."
+        return True, "Account gelöscht."
+    except Exception as e: return False, str(e)
+
+# ==========================================
+# 4. EVENTS & AUFGABEN SQL
+# ==========================================
+def parse_and_import_ics(file_bytes, team_str):
+    """Liest eine ICS Datei und speichert VEVENTs in der Datenbank"""
+    try:
+        cal = icalendar.Calendar.from_ical(file_bytes)
+        events_added = 0
+        with engine.begin() as conn:
+            for component in cal.walk():
+                if component.name == "VEVENT":
+                    titel = str(component.get('summary', 'Unbekanntes Event'))
+                    ort = str(component.get('location', ''))
+                    
+                    # Startzeit
+                    dtstart = component.get('dtstart')
+                    start_str = ""
+                    if dtstart:
+                        start_dt = dtstart.dt
+                        if isinstance(start_dt, datetime.datetime): start_str = start_dt.strftime('%d.%m.%Y %H:%M')
+                        else: start_str = start_dt.strftime('%d.%m.%Y')
+                        
+                    # Endzeit
+                    dtend = component.get('dtend')
+                    ende_str = ""
+                    if dtend:
+                        ende_dt = dtend.dt
+                        if isinstance(ende_dt, datetime.datetime): ende_str = ende_dt.strftime('%d.%m.%Y %H:%M')
+                        else: ende_str = ende_dt.strftime('%d.%m.%Y')
+
+                    conn.execute(text("""
+                        INSERT INTO events (titel, start_zeit, ende_zeit, ort, betroffene_teams)
+                        VALUES (:titel, :start, :ende, :ort, :teams)
+                    """), {"titel": titel, "start": start_str, "ende": ende_str, "ort": ort, "teams": team_str})
+                    events_added += 1
+        return True, f"{events_added} Termine erfolgreich für {team_str} importiert!"
     except Exception as e:
-        return False, f"Fehler beim Löschen: {e}"
+        return False, f"Fehler beim ICS Import: {e}"
 
-def authenticate(email, password):
-    with engine.connect() as conn:
-        result = conn.execute(text("SELECT * FROM users WHERE email = :email AND rolle != 'Kind'"), {"email": email}).fetchone()
-        if result and verify_password(password, result.password_hash):
-            return dict(result._mapping)
-    return None
-
-def get_tasks_and_assignments():
+def get_all_events():
     try:
         with engine.connect() as conn:
-            tasks_df = pd.read_sql(text("SELECT * FROM tasks ORDER BY task_id DESC"), conn)
-            assigns_df = pd.read_sql(text("""
-                SELECT ta.task_id, ta.user_id, u.name as assignee_name 
-                FROM task_assignments ta 
-                JOIN users u ON ta.user_id = u.user_id
-            """), conn)
-            return tasks_df, assigns_df
-    except:
-        return pd.DataFrame(), pd.DataFrame()
+            return pd.read_sql(text("SELECT * FROM events ORDER BY event_id DESC"), conn)
+    except: return pd.DataFrame()
 
-def create_task(kategorie, beschreibung, max_helfer, erstellt_von, start_zeit=None, ende_zeit=None, betroffene_teams=None):
+def get_all_tasks():
+    try:
+        with engine.connect() as conn: return pd.read_sql(text("SELECT * FROM tasks ORDER BY task_id DESC"), conn)
+    except: return pd.DataFrame()
+
+def get_task_assignments():
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(text("SELECT ta.task_id, ta.user_id, u.name as assignee_name FROM task_assignments ta JOIN users u ON ta.user_id = u.user_id"), conn)
+    except: return pd.DataFrame()
+
+def create_task(kategorie, beschreibung, max_helfer, user_id, start=None, ende=None, teams=None, event_id=None):
     try:
         with engine.begin() as conn:
             conn.execute(text("""
-                INSERT INTO tasks (kategorie, beschreibung, max_helfer, erstellt_von, start_zeit, ende_zeit, betroffene_teams)
-                VALUES (:kat, :besch, :max_h, :erst, :start, :ende, :teams)
-            """), {
-                "kat": kategorie, "besch": beschreibung, "max_h": max_helfer, "erst": erstellt_von,
-                "start": start_zeit, "ende": ende_zeit, "teams": betroffene_teams
-            })
-        return True, "Aufgabe erfolgreich angelegt!"
-    except Exception as e:
-        return False, f"Fehler beim Erstellen der Aufgabe: {e}"
-
-def accept_task(task_id, user_id):
-    try:
-        with engine.begin() as conn:
-            # Prüfen ob der Nutzer schon eingetragen ist
-            existing = conn.execute(text("SELECT 1 FROM task_assignments WHERE task_id = :t AND user_id = :u"), 
-                                    {"t": task_id, "u": user_id}).scalar()
-            if existing:
-                return False, "Diese Person ist bereits für die Aufgabe eingetragen!"
-            
-            conn.execute(text("INSERT INTO task_assignments (task_id, user_id) VALUES (:t, :u)"), 
-                         {"t": task_id, "u": user_id})
-        return True, "Aufgabe erfolgreich übernommen!"
-    except Exception as e:
-        return False, f"Fehler bei der Übernahme: {e}"
+                INSERT INTO tasks (kategorie, beschreibung, max_helfer, erstellt_von, start_zeit, ende_zeit, betroffene_teams, event_id)
+                VALUES (:kat, :besch, :max, :erst, :st, :en, :teams, :ev)
+            """), {"kat": kategorie, "besch": beschreibung, "max": max_helfer, "erst": user_id, "st": start, "en": ende, "teams": teams, "ev": event_id})
+        return True, "Aufgabe erstellt!"
+    except Exception as e: return False, str(e)
 
 def delete_task(task_id):
     try:
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM tasks WHERE task_id = :t"), {"t": task_id})
-        return True, "Aufgabe gelöscht."
-    except Exception as e:
-        return False, f"Fehler beim Löschen der Aufgabe: {e}"
+        return True, "Aufgabe gelöscht!"
+    except: return False, "Fehler beim Löschen."
+
+def delete_event(event_id):
+    try:
+        with engine.begin() as conn:
+            # Lösche erst alle Tasks, die an dieses Event gekoppelt sind
+            conn.execute(text("DELETE FROM tasks WHERE event_id = :e"), {"e": event_id})
+            conn.execute(text("DELETE FROM events WHERE event_id = :e"), {"e": event_id})
+        return True, "Spieltag inkl. Aufgaben gelöscht!"
+    except Exception as e: return False, str(e)
+
+def accept_task(task_id, user_id):
+    try:
+        with engine.begin() as conn:
+            existing = conn.execute(text("SELECT 1 FROM task_assignments WHERE task_id = :t AND user_id = :u"), {"t": task_id, "u": user_id}).scalar()
+            if existing: return False, "Bereits eingetragen!"
+            conn.execute(text("INSERT INTO task_assignments (task_id, user_id) VALUES (:t, :u)"), {"t": task_id, "u": user_id})
+        return True, "Übernommen!"
+    except Exception as e: return False, str(e)
 
 
 # ==========================================
-# 5. BENUTZEROBERFLÄCHE (MAIN UI)
+# 5. UI COMPONENTS
 # ==========================================
 st.title("🏐 TuB Helfer-Orga")
-
 TEAM_LISTE = ["U12", "U13", "U14", "U16", "U18", "U20", "Herren 1", "Herren 2", "Herren 3", "Herren 4"]
 
-# Sicheres Session-Management (Ohne Cookies!)
 if 'logged_in_user' not in st.session_state:
-    st.session_state['logged_in_user'] = None
+    saved_user_id = cookies.get("logged_in_user_id")
+    if saved_user_id: st.session_state['logged_in_user'] = get_user_by_id(int(saved_user_id))
+    else: st.session_state['logged_in_user'] = None
 
-user_count = get_user_count()
+if get_user_count() == 0:
+    st.warning("⚠️ Keine Benutzer in der Datenbank gefunden. Richte den Admin ein:")
+    with st.form("setup"):
+        if st.form_submit_button("Admin erstellen") and create_initial_admin(st.text_input("Name"), st.text_input("E-Mail"), st.text_input("Passwort", type="password")):
+            st.success("Erstellt! Lade die Seite neu.")
+            st.rerun()
 
-# FALL A: Erste Einrichtung
-if user_count == 0:
-    st.warning("⚠️ Keine Benutzer in der Datenbank gefunden. Bitte richte den ersten Admin-Account ein:")
-    with st.form("setup_admin_form"):
-        admin_name = st.text_input("Dein Name (z.B. Max Mustermann)")
-        admin_email = st.text_input("E-Mail-Adresse")
-        admin_pass = st.text_input("Sicheres Passwort", type="password")
-        if st.form_submit_button("Initialen Admin-Account erstellen"):
-            if admin_name and admin_email and admin_pass:
-                if create_initial_admin(admin_name, admin_email, admin_pass):
-                    st.success("Admin-Account erfolgreich erstellt! Bitte lade die Seite neu.")
-                    st.rerun()
-            else:
-                st.error("Bitte fülle alle Felder aus.")
-
-# FALL B: Login & Registrierung
 elif st.session_state['logged_in_user'] is None:
-    tab_login, tab_register = st.tabs(["🔑 Einloggen", "📝 Neu Registrieren"])
-    
-    with tab_login:
-        with st.form("login_form"):
-            st.subheader("Willkommen zurück!")
-            email = st.text_input("E-Mail")
-            password = st.text_input("Passwort", type="password")
+    t_login, t_reg = st.tabs(["🔑 Einloggen", "📝 Neu Registrieren"])
+    with t_login:
+        with st.form("login"):
+            user = authenticate(st.text_input("E-Mail"), st.text_input("Passwort", type="password"))
             if st.form_submit_button("Einloggen"):
-                user = authenticate(email, password)
                 if user:
                     st.session_state['logged_in_user'] = user
+                    cookies["logged_in_user_id"] = str(user['user_id'])
+                    cookies.save()
                     st.rerun()
-                else:
-                    st.error("Zugangsdaten ungültig.")
-                    
-    with tab_register:
-        with st.form("register_form"):
-            st.subheader("Werde Teil der TuB Helfer-Crew!")
-            new_name = st.text_input("Vor- und Nachname")
-            new_email = st.text_input("E-Mail-Adresse")
-            new_password = st.text_input("Passwort", type="password")
-            col1, col2 = st.columns(2)
-            with col1:
-                new_rolle = st.selectbox("Ich bin im Verein...", ["Spieler", "Trainer", "Elternteil", "Organisator"])
-            with col2:
-                new_team = st.multiselect("Mein(e) Team(s) / Mannschaft(en)", TEAM_LISTE)
-            dsgvo = st.checkbox("Ich stimme der Verarbeitung meiner Daten für die Vereinsorganisation zu (DSGVO).")
-            
-            if st.form_submit_button("Kostenlos Registrieren"):
-                if not dsgvo: st.error("Bitte dem Datenschutz zustimmen.")
-                elif not new_name or not new_email or not new_password: st.error("Bitte alle Felder ausfüllen.")
-                else:
-                    success, msg = register_new_user(new_name, new_email, new_password, new_rolle, new_team)
-                    if success: st.success(msg)
-                    else: st.error(msg)
+                else: st.error("Zugangsdaten ungültig.")
+    with t_reg:
+        with st.form("reg"):
+            n, e, p = st.text_input("Name"), st.text_input("E-Mail"), st.text_input("Passwort", type="password")
+            r, t = st.selectbox("Rolle", ["Spieler", "Trainer", "Elternteil", "Organisator"]), st.multiselect("Team", TEAM_LISTE)
+            dsgvo = st.checkbox("DSGVO zustimmen")
+            if st.form_submit_button("Registrieren") and dsgvo and n and e and p:
+                succ, msg = register_new_user(n, e, p, r, t)
+                if succ: st.success(msg)
+                else: st.error(msg)
 
-# FALL C: Eingeloggt (Das Haupt-Dashboard)
 else:
     user = st.session_state['logged_in_user']
-    user_team_display = f" ({user['team']})" if user.get('team') and user.get('team') != "Kein Team" else ""
-    
-    col1, col2 = st.columns([4, 1])
-    with col1:
-        st.write(f"Willkommen zurück, **{user['name']}** - {user['rolle']}{user_team_display}!")
-    with col2:
-        if st.button("🚪 Ausloggen"):
-            st.session_state['logged_in_user'] = None
-            st.rerun()
-            
-    # Lade Aufgaben, Zuweisungen und Kinder nur 1x pro Refresh
-    tasks_df, assigns_df = get_tasks_and_assignments()
+    st.write(f"Willkommen zurück, **{user['name']}** - {user['rolle']}!")
+    if st.button("🚪 Ausloggen"):
+        if "logged_in_user_id" in cookies:
+            del cookies["logged_in_user_id"]
+            cookies.save()
+        st.session_state['logged_in_user'] = None
+        st.rerun()
+
+    # DATEN LADEN
     children_df = get_children(user['user_id'])
+    tasks_df = get_all_tasks()
+    assign_df = get_task_assignments()
+    events_df = get_all_events()
+
+    # TEAM LOGIK FÜR FILTER
+    my_teams = set()
+    if user.get('team') and user['team'] != "Kein Team": my_teams.update([t.strip() for t in user['team'].split(',')])
+    if not children_df.empty:
+        for _, c in children_df.iterrows():
+            if c.get('team') and c['team'] != "Kein Team": my_teams.update([t.strip() for t in c['team'].split(',')])
     
-    # Aufbau der Reiter (Tabs)
-    tab_list = ["📋 Aufgaben & Schichten", "📅 Mein Kalender", "👨‍👩‍👧 Meine Familie"]
-    if user['rolle'] == 'Admin':
-        tab_list.append("👥 Admin-Bereich")
-        
-    tabs = st.tabs(tab_list)
-    
+    def is_relevant(teams_str):
+        if pd.isna(teams_str) or not str(teams_str).strip(): return True # Allgemeine Termine
+        return any(t.strip() in my_teams for t in str(teams_str).split(','))
+
+    # TABS AUFBAUEN
+    tab_titles = ["🏆 Spieltage & Events", "📋 Freie Aufgaben", "📅 Kalender-Ansicht", "👨‍👩‍👧 Familie"]
+    if user['rolle'] == 'Admin': tab_titles.append("👥 Admin")
+    tabs = st.tabs(tab_titles)
+
     # ----------------------------------------------------
-    # TAB 1: AUFGABEN & SCHICHTEN
+    # TAB 1: SPIELTAGE & EVENTS (NEU)
     # ----------------------------------------------------
     with tabs[0]:
-        if user['rolle'] in ['Admin', 'Organisator']:
-            with st.expander("➕ Neue Aufgabe anlegen"):
-                with st.form("new_task_form"):
-                    kategorie_input = st.text_input("Kategorie (z.B. Hallenaufbau, Catering)")
-                    beschreibung_input = st.text_area("Beschreibung / Details")
-                    
-                    c1, c2, c3 = st.columns(3)
-                    with c1: max_helfer_input = st.number_input("Benötigte Helfer", min_value=1, value=1)
-                    with c2: start_date = st.date_input("Startdatum", value=datetime.date.today())
-                    with c3: start_time = st.time_input("Startzeit", value=datetime.time(10, 0))
-                    
-                    c4, c5, c6 = st.columns(3)
-                    with c5: end_date = st.date_input("Enddatum", value=datetime.date.today())
-                    with c6: end_time = st.time_input("Endzeit", value=datetime.time(12, 0))
-                    
-                    task_teams = st.multiselect("Betroffene Teams (optional)", TEAM_LISTE)
-                    
-                    if st.form_submit_button("Aufgabe speichern"):
-                        if kategorie_input and beschreibung_input:
-                            start_dt_str = f"{start_date.strftime('%d.%m.%Y')} {start_time.strftime('%H:%M')} Uhr"
-                            end_dt_str = f"{end_date.strftime('%d.%m.%Y')} {end_time.strftime('%H:%M')} Uhr"
-                            teams_str = ", ".join(task_teams) if task_teams else None
-                            
-                            success, msg = create_task(kategorie_input, beschreibung_input, max_helfer_input, 
-                                                       user['user_id'], start_dt_str, end_dt_str, teams_str)
-                            if success:
-                                st.success(msg)
-                                st.rerun()
-                            else: st.error(msg)
-                        else: st.error("Bitte Kategorie und Beschreibung ausfüllen.")
-                        
-        st.write("") 
+        st.write("Hier findest du organisierte Spieltage. Klicke auf ein Event, um Teilnahmen oder Catering einzutragen.")
         
-        if not tasks_df.empty:
-            for _, row in tasks_df.iterrows():
-                task_id = row['task_id']
-                # Helfer für diese Aufgabe ermitteln
-                task_assigns = assigns_df[assigns_df['task_id'] == task_id] if not assigns_df.empty else pd.DataFrame()
-                current_helfer = len(task_assigns)
-                max_h = int(row['max_helfer']) if pd.notna(row['max_helfer']) else 1
-                
-                with st.container():
-                    col1, col2, col3 = st.columns([4, 2, 2])
-                    with col1:
-                        st.write(f"**{row['kategorie']}**")
-                        if pd.notna(row.get('start_zeit')) and pd.notna(row.get('ende_zeit')):
-                            st.write(f"🗓️ **{row['start_zeit']}** bis **{row['ende_zeit']}**")
-                        if pd.notna(row.get('betroffene_teams')) and row['betroffene_teams']:
-                            st.write(f"👕 **Teams:** {row['betroffene_teams']}")
-                        st.caption(row['beschreibung'])
+        rel_events = events_df[events_df['betroffene_teams'].apply(is_relevant)] if not events_df.empty else pd.DataFrame()
+        
+        if not rel_events.empty:
+            for _, ev in rel_events.iterrows():
+                ev_id = ev['event_id']
+                with st.expander(f"🏐 {ev['titel']} ({ev['start_zeit']})"):
+                    st.write(f"📍 **Ort:** {ev['ort']} | 👕 **Teams:** {ev['betroffene_teams']}")
                     
-                    with col2:
-                        st.write(f"**Helfer:** {current_helfer} / {max_h}")
-                        if current_helfer > 0:
-                            st.write("👥 Dabei sind: " + ", ".join(task_assigns['assignee_name'].tolist()))
-                        else:
-                            st.write("👥 Noch keine Helfer")
+                    # Tasks für dieses Event laden
+                    ev_tasks = tasks_df[tasks_df['event_id'] == ev_id] if not tasks_df.empty else pd.DataFrame()
                     
-                    with col3:
-                        # Optionen für Übernahme aufbauen (User selbst + Kinder)
-                        options = {user['user_id']: "Ich selbst"}
-                        if not children_df.empty:
-                            for _, child in children_df.iterrows():
-                                options[child['user_id']] = f"Kind: {child['name']}"
+                    st.markdown("#### Organisation & Aufgaben:")
+                    if not ev_tasks.empty:
+                        for _, tsk in ev_tasks.iterrows():
+                            t_id = tsk['task_id']
+                            t_assigns = assign_df[assign_df['task_id'] == t_id] if not assign_df.empty else pd.DataFrame()
+                            cur_h = len(t_assigns)
+                            max_h = int(tsk.get('max_helfer', 1))
+                            
+                            tc1, tc2 = st.columns([3, 2])
+                            with tc1:
+                                st.write(f"**{tsk['kategorie']}** ({cur_h}/{max_h} belegt)")
+                                st.caption(tsk['beschreibung'])
+                                if cur_h > 0: st.write("👥 " + ", ".join(t_assigns['assignee_name'].tolist()))
+                            with tc2:
+                                options = {user['user_id']: "Ich selbst"}
+                                if not children_df.empty:
+                                    for _, child in children_df.iterrows(): options[child['user_id']] = f"Kind: {child['name']}"
+                                if not t_assigns.empty:
+                                    options = {k: v for k, v in options.items() if k not in t_assigns['user_id'].tolist()}
                                 
-                        # Bereits zugewiesene herausfiltern, damit man sich nicht doppelt einträgt
-                        if not task_assigns.empty:
-                            assigned_ids = task_assigns['user_id'].tolist()
-                            options = {k: v for k, v in options.items() if k not in assigned_ids}
-                            
-                        if current_helfer < max_h:
-                            if options:
-                                selected_user_id = st.selectbox("Wer übernimmt?", options=list(options.keys()), 
-                                                                format_func=lambda x: options[x], key=f"sel_{task_id}", label_visibility="collapsed")
-                                if st.button("Übernehmen", key=f"btn_{task_id}", use_container_width=True):
-                                    success, msg = accept_task(task_id, selected_user_id)
-                                    if success:
-                                        st.success(msg)
-                                        st.rerun()
-                                    else: st.error(msg)
-                            else:
-                                st.success("✅ Du (und deine Familie) bist bereits eingetragen.")
-                        else:
-                            st.success("✅ Schicht ist voll belegt!")
-                            
-                        # Löschen Button für Admins & Ersteller
-                        if user['rolle'] == 'Admin' or row['erstellt_von'] == user['user_id']:
-                            if st.button("🗑️ Löschen", key=f"del_{task_id}", type="secondary", use_container_width=True):
-                                success, msg = delete_task(task_id)
-                                if success:
-                                    st.success(msg)
+                                if cur_h < max_h:
+                                    if options:
+                                        sel_u = st.selectbox("Wer?", list(options.keys()), format_func=lambda x: options[x], key=f"sel_ev_{t_id}", label_visibility="collapsed")
+                                        if st.button("Eintragen", key=f"btn_ev_{t_id}"):
+                                            success, msg = accept_task(t_id, sel_u)
+                                            if success: st.success(msg); st.rerun()
+                                    else: st.success("✅ Du bist eingetragen.")
+                                else: st.success("✅ Voll belegt.")
+                                
+                                if user['rolle'] == 'Admin' or tsk.get('erstellt_von') == user['user_id']:
+                                    if st.button("🗑️", key=f"del_ev_{t_id}"): 
+                                        delete_task(t_id); st.rerun()
+                            st.divider()
+                    else:
+                        st.info("Noch keine Aufgaben für dieses Event hinterlegt.")
+                        
+                    # Neue Aufgabe ZU DIESEM EVENT hinzufügen
+                    if user['rolle'] in ['Admin', 'Organisator']:
+                        st.markdown("➕ **Neuen Orga-Punkt für dieses Event erstellen**")
+                        with st.form(f"form_ev_{ev_id}"):
+                            nk = st.text_input("Was wird gebraucht? (z.B. Kuchen, Fahrer, Spielerzusage)")
+                            nb = st.text_area("Details")
+                            nm = st.number_input("Anzahl Personen", min_value=1, value=1)
+                            if st.form_submit_button("Zum Event hinzufügen"):
+                                if nk:
+                                    create_task(nk, nb, nm, user['user_id'], ev['start_zeit'], ev['ende_zeit'], ev['betroffene_teams'], event_id=ev_id)
                                     st.rerun()
-                                else: st.error(msg)
-                                
-                st.divider()
+                                    
+                    # Event löschen
+                    if user['rolle'] == 'Admin':
+                        if st.button("🚨 Komplettes Event löschen", key=f"del_event_{ev_id}"):
+                            delete_event(ev_id); st.rerun()
         else:
-            st.info("Es sind aktuell keine Aufgaben eingetragen.")
+            st.info("Keine Spieltage für deine Teams gefunden.")
 
     # ----------------------------------------------------
-    # TAB 2: KALENDER
+    # TAB 2: FREIE AUFGABEN (STANDALONE)
     # ----------------------------------------------------
     with tabs[1]:
-        st.write("Hier siehst du alle Termine deiner Mannschaften sowie allgemeine Vereinstermine.")
-        if not tasks_df.empty:
-            my_teams = set()
-            if user.get('team') and user['team'] != "Kein Team":
-                my_teams.update([t.strip() for t in user['team'].split(',')])
-            if not children_df.empty:
-                for _, child in children_df.iterrows():
-                    if child.get('team') and child['team'] != "Kein Team":
-                        my_teams.update([t.strip() for t in child['team'].split(',')])
+        if user['rolle'] in ['Admin', 'Organisator']:
+            with st.expander("➕ Allgemeine Aufgabe anlegen (Ohne Event-Bezug)"):
+                with st.form("new_task_form"):
+                    k = st.text_input("Kategorie")
+                    b = st.text_area("Details")
+                    m = st.number_input("Helfer", min_value=1, value=1)
+                    t = st.multiselect("Teams", TEAM_LISTE)
+                    c1, c2 = st.columns(2)
+                    with c1: sd, stt = st.date_input("Start"), st.time_input("Zeit")
+                    if st.form_submit_button("Speichern"):
+                        dt_str = f"{sd.strftime('%d.%m.%Y')} {stt.strftime('%H:%M')} Uhr"
+                        create_task(k, b, m, user['user_id'], dt_str, None, ", ".join(t) if t else None)
+                        st.rerun()
                         
-            def is_relevant_event(task_teams_str):
-                if pd.isna(task_teams_str) or not str(task_teams_str).strip():
-                    return True # Allgemeiner Termin
-                task_teams = [t.strip() for t in str(task_teams_str).split(',')]
-                return any(team in my_teams for team in task_teams)
+        st.write("")
+        # Zeige nur Tasks, die NICHT an ein Event gekoppelt sind
+        free_tasks = tasks_df[tasks_df['event_id'].isna()] if not tasks_df.empty else pd.DataFrame()
+        
+        if not free_tasks.empty:
+            for _, row in free_tasks.iterrows():
+                t_id = row['task_id']
+                t_assigns = assign_df[assign_df['task_id'] == t_id] if not assign_df.empty else pd.DataFrame()
+                cur_h, max_h = len(t_assigns), int(row.get('max_helfer', 1))
                 
-            cal_df = tasks_df[tasks_df['betroffene_teams'].apply(is_relevant_event)].copy()
-            if not cal_df.empty:
-                try:
-                    cal_df['sort_date'] = pd.to_datetime(cal_df['start_zeit'].str.replace(' Uhr', ''), format='%d.%m.%Y %H:%M', errors='coerce')
-                    cal_df = cal_df.sort_values(by='sort_date')
-                except: pass
-                st.dataframe(cal_df[['start_zeit', 'ende_zeit', 'kategorie', 'beschreibung', 'betroffene_teams']].rename(
-                    columns={'start_zeit': 'Start', 'ende_zeit': 'Ende', 'kategorie': 'Kategorie', 
-                             'beschreibung': 'Beschreibung', 'betroffene_teams': 'Teams'}
-                ), use_container_width=True, hide_index=True)
-            else:
-                st.info("Aktuell stehen keine Termine an.")
-        else:
-            st.info("Es sind noch keine Aufgaben oder Termine im System angelegt.")
+                with st.container():
+                    col1, col2 = st.columns([3, 2])
+                    with col1:
+                        st.write(f"**{row['kategorie']}**")
+                        if pd.notna(row.get('start_zeit')): st.write(f"🗓️ {row['start_zeit']}")
+                        if pd.notna(row.get('betroffene_teams')) and row['betroffene_teams']: st.write(f"👕 Teams: {row['betroffene_teams']}")
+                        st.caption(row['beschreibung'])
+                        st.write(f"👥 {cur_h}/{max_h} belegt. " + ", ".join(t_assigns['assignee_name'].tolist()))
+                    with col2:
+                        options = {user['user_id']: "Ich selbst"}
+                        if not children_df.empty:
+                            for _, child in children_df.iterrows(): options[child['user_id']] = f"Kind: {child['name']}"
+                        if not t_assigns.empty: options = {k: v for k, v in options.items() if k not in t_assigns['user_id'].tolist()}
+                        
+                        if cur_h < max_h:
+                            if options:
+                                sel_u = st.selectbox("Wer?", list(options.keys()), key=f"sel_f_{t_id}", label_visibility="collapsed")
+                                if st.button("Übernehmen", key=f"btn_f_{t_id}"):
+                                    accept_task(t_id, sel_u); st.rerun()
+                            else: st.success("✅ Eingetragen.")
+                        else: st.success("✅ Voll!")
+                        
+                        if user['rolle'] == 'Admin' or row.get('erstellt_von') == user['user_id']:
+                            if st.button("🗑️ Löschen", key=f"del_f_{t_id}"): delete_task(t_id); st.rerun()
+                st.divider()
+        else: st.info("Aktuell keine allgemeinen Aufgaben.")
 
     # ----------------------------------------------------
-    # TAB 3: FAMILIE
+    # TAB 3: KALENDER
     # ----------------------------------------------------
     with tabs[2]:
-        st.write("Verwalte hier Familienmitglieder. Du kannst stellvertretend für sie Aufgaben übernehmen.")
-        if not children_df.empty:
-            st.table(children_df[['name', 'team']].rename(columns={'name': 'Name des Kindes', 'team': 'Mannschaft'}))
-            
-        t_new, t_exist = st.tabs(["➕ Neues Kind anlegen", "🔗 Bestehendes Kind verknüpfen"])
-        with t_new:
-            with st.form("add_child_form"):
-                col1, col2 = st.columns(2)
-                with col1: child_name = st.text_input("Vor- und Nachname des Kindes")
-                with col2: child_team = st.multiselect("Mannschaft(en) des Kindes", TEAM_LISTE)
-                if st.form_submit_button("Neues Familienmitglied speichern"):
-                    if child_name:
-                        success, msg = add_child(user['user_id'], child_name, child_team)
-                        if success: st.success(msg); st.rerun()
-                        else: st.error(msg)
-                    else: st.warning("Bitte Namen eingeben.")
-        with t_exist:
-            all_kids_df = get_all_children_in_db()
-            if not all_kids_df.empty:
-                with st.form("link_child_form"):
-                    kid_options = {row['user_id']: f"{row['name']} ({row['team']})" for _, row in all_kids_df.iterrows()}
-                    selected_kid_id = st.selectbox("Wähle ein Kind aus der Datenbank", options=list(kid_options.keys()), format_func=lambda x: kid_options[x])
-                    if st.form_submit_button("Kind mit meinem Account verknüpfen"):
-                        success, msg = link_existing_child(user['user_id'], selected_kid_id)
-                        if success: st.success(msg); st.rerun()
-                        else: st.error(msg)
-            else:
-                st.info("Keine Kinder im System.")
+        st.write("Chronologische Übersicht aller relevanten Termine (Events & Aufgaben).")
+        cal_data = []
+        
+        # Events in Kalender packen
+        if not events_df.empty:
+            for _, ev in events_df[events_df['betroffene_teams'].apply(is_relevant)].iterrows():
+                cal_data.append({"Datum": ev['start_zeit'], "Typ": "🏆 Spieltag", "Titel": ev['titel'], "Teams": ev['betroffene_teams']})
+        
+        # Allgemeine Tasks in Kalender packen
+        if not tasks_df.empty:
+            for _, tk in tasks_df[tasks_df['event_id'].isna() & tasks_df['betroffene_teams'].apply(is_relevant)].iterrows():
+                if pd.notna(tk.get('start_zeit')):
+                    cal_data.append({"Datum": tk['start_zeit'], "Typ": "📋 Aufgabe", "Titel": tk['kategorie'], "Teams": tk['betroffene_teams']})
+                    
+        if cal_data:
+            cal_df = pd.DataFrame(cal_data)
+            try:
+                cal_df['sort_date'] = pd.to_datetime(cal_df['Datum'].str.replace(' Uhr', ''), format='%d.%m.%Y %H:%M', errors='coerce')
+                cal_df = cal_df.sort_values(by='sort_date').drop(columns=['sort_date'])
+            except: pass
+            st.dataframe(cal_df, use_container_width=True, hide_index=True)
+        else: st.info("Keine Einträge im Kalender.")
 
     # ----------------------------------------------------
-    # TAB 4: ADMIN BEREICH
+    # TAB 4: FAMILIE
+    # ----------------------------------------------------
+    with tabs[3]:
+        with st.form("add_c"):
+            c1, c2 = st.columns(2)
+            with c1: cn = st.text_input("Name Kind")
+            with c2: ct = st.multiselect("Teams", TEAM_LISTE)
+            if st.form_submit_button("Kind anlegen") and cn:
+                add_child(user['user_id'], cn, ct); st.rerun()
+                
+        with st.form("link_c"):
+            all_k = get_all_children_in_db()
+            if not all_k.empty:
+                opts = {r['user_id']: f"{r['name']} ({r['team']})" for _, r in all_k.iterrows()}
+                sk = st.selectbox("Bestehendes Kind verknüpfen", list(opts.keys()), format_func=lambda x: opts[x])
+                if st.form_submit_button("Verknüpfen"): link_existing_child(user['user_id'], sk); st.rerun()
+
+    # ----------------------------------------------------
+    # TAB 5: ADMIN
     # ----------------------------------------------------
     if user['rolle'] == 'Admin':
-        with tabs[3]:
-            try:
-                with engine.connect() as conn:
-                    df_users = pd.read_sql("SELECT user_id, name, email, rolle, team, dsgvo_akzeptiert FROM users", conn)
-                df_users['Typ'] = df_users['rolle'].apply(lambda x: 'Kind / Sub-Account' if x == 'Kind' else 'Haupt-Account')
-                st.dataframe(df_users[['user_id', 'name', 'email', 'rolle', 'team', 'Typ', 'dsgvo_akzeptiert']], use_container_width=True)
-                
-                with st.expander("🗑️ Account oder doppeltes Kind löschen"):
-                    with st.form("delete_user_form"):
-                        st.write("Wähle einen Account aus, der vollständig gelöscht werden soll.")
-                        user_options = {row['user_id']: f"{row['name']} ({row['Typ']}, Team: {row['team']})" for _, row in df_users.iterrows()}
-                        selected_del_id = st.selectbox("Zu löschender Account:", options=list(user_options.keys()), format_func=lambda x: user_options[x])
-                        if st.form_submit_button("Account unwiderruflich löschen"):
-                            if selected_del_id == user['user_id']:
-                                st.error("Du kannst dich nicht selbst löschen!")
-                            else:
-                                success, msg = delete_user(selected_del_id)
-                                if success: st.success(msg); st.rerun()
-                                else: st.error(msg)
-            except Exception as e:
-                st.error(f"Fehler beim Laden der Benutzerliste: {e}")
+        with tabs[4]:
+            st.subheader("📅 ICS Kalender-Import")
+            st.write("Lade hier den Spielplan (ICS-Datei aus SAMS/Web) eines Teams hoch. Daraus werden automatisch 'Events' erstellt.")
+            with st.form("ics_import"):
+                ics_file = st.file_uploader("ICS-Datei auswählen", type=["ics"])
+                target_team = st.multiselect("Für welches Team gilt dieser Spielplan?", TEAM_LISTE)
+                if st.form_submit_button("Spielplan importieren"):
+                    if ics_file and target_team:
+                        succ, msg = parse_and_import_ics(ics_file.read(), ", ".join(target_team))
+                        if succ: st.success(msg)
+                        else: st.error(msg)
+                    else: st.warning("Bitte Datei und Team wählen.")
+                    
+            st.divider()
+            st.subheader("👥 User-Verwaltung")
+            with engine.connect() as conn:
+                df_u = pd.read_sql("SELECT user_id, name, email, rolle, team FROM users", conn)
+            st.dataframe(df_u, use_container_width=True)
+            with st.form("del_u"):
+                opts = {r['user_id']: f"{r['name']} ({r['rolle']})" for _, r in df_u.iterrows()}
+                d_id = st.selectbox("Löschen:", list(opts.keys()), format_func=lambda x: opts[x])
+                if st.form_submit_button("User Löschen") and d_id != user['user_id']:
+                    delete_user(d_id); st.rerun()
