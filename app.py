@@ -19,22 +19,29 @@ except ImportError:
 # ==========================================
 st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide")
 
-try:
-    DB_URL = st.secrets["DB_URL"]
-    engine = create_engine(
-        DB_URL, 
-        connect_args={"sslmode": "require", "connect_timeout": 15},
-        pool_pre_ping=True
-    )
-except Exception as e:
-    st.error(f"Datenbankfehler beim Verbindungsaufbau: {e}")
-    st.stop()
+# CACHING DER DATENBANKVERBINDUNG (Löst das Performance-Problem beim Neu-Laden)
+@st.cache_resource
+def get_database_engine():
+    try:
+        DB_URL = st.secrets["DB_URL"]
+        return create_engine(
+            DB_URL, 
+            connect_args={"sslmode": "require", "connect_timeout": 15},
+            pool_pre_ping=True
+        )
+    except Exception as e:
+        st.error(f"Datenbankfehler beim Verbindungsaufbau: {e}")
+        st.stop()
+
+engine = get_database_engine()
 
 # ==========================================
 # 2. DATENBANK-TABELLEN INITIALISIEREN
 # ==========================================
-def update_db_schema(engine):
-    with engine.begin() as conn:
+# Wird nur einmal pro Session ausgeführt
+@st.cache_resource
+def update_db_schema(_engine):
+    with _engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id SERIAL PRIMARY KEY,
@@ -107,6 +114,7 @@ def update_db_schema(engine):
                 user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE
             );
         """))
+    return True
 
 try:
     update_db_schema(engine)
@@ -128,6 +136,10 @@ def verify_password(password: str, hashed_password: str) -> bool:
     hash_obj = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
     return hash_obj.hex() == hash_hex
 
+# Cache löschen nach Datenänderungen
+def clear_caches():
+    st.cache_data.clear()
+
 def get_user_count():
     try:
         with engine.connect() as conn: return conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
@@ -139,6 +151,7 @@ def create_initial_admin(name, email, password):
         with engine.begin() as conn:
             conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, :h, 'Admin', 1, 'Kein Team')"),
                 {"n": name, "e": email, "h": hashed})
+        clear_caches()
         return True
     except: return False
 
@@ -149,6 +162,7 @@ def register_new_user(name, email, password, rolle, team_list):
         with engine.begin() as conn:
             conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, :h, :r, 1, :t)"),
                 {"n": name, "e": email, "h": hashed, "r": rolle, "t": team_str})
+        clear_caches()
         return True, "Erfolgreich registriert!"
     except Exception as e:
         if "unique" in str(e).lower(): return False, "E-Mail bereits registriert!"
@@ -160,14 +174,6 @@ def authenticate(email, password):
         if result and verify_password(password, result.password_hash): return dict(result._mapping)
     return None
 
-def get_user_by_id(user_id):
-    try:
-        with engine.connect() as conn:
-            res = conn.execute(text("SELECT * FROM users WHERE user_id = :id AND rolle != 'Kind'"), {"id": user_id}).fetchone()
-            if res: return dict(res._mapping)
-    except: pass
-    return None
-
 def add_child(parent_id, child_name, child_team_list):
     dummy_email = f"kind_{uuid.uuid4().hex[:8]}@tub.lokal"
     dummy_pass = hash_password(secrets.token_hex(16)) 
@@ -177,6 +183,7 @@ def add_child(parent_id, child_name, child_team_list):
             res = conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, parent_id, team) VALUES (:n, :e, :h, 'Kind', 1, :p, :t) RETURNING user_id"),
                 {"n": child_name, "e": dummy_email, "h": dummy_pass, "p": parent_id, "t": team_str})
             conn.execute(text("INSERT INTO parent_child (parent_id, child_id) VALUES (:p, :c) ON CONFLICT DO NOTHING"), {"p": parent_id, "c": res.scalar()})
+        clear_caches()
         return True, f"{child_name} erfolgreich hinzugefügt!"
     except Exception as e: return False, str(e)
 
@@ -184,15 +191,18 @@ def link_existing_child(parent_id, child_id):
     try:
         with engine.begin() as conn:
             conn.execute(text("INSERT INTO parent_child (parent_id, child_id) VALUES (:p, :c) ON CONFLICT DO NOTHING"), {"p": parent_id, "c": child_id})
+        clear_caches()
         return True, "Verknüpft!"
     except: return False, "Fehler!"
 
+@st.cache_data(ttl=60)
 def get_children(parent_id):
     try:
         with engine.connect() as conn:
             return pd.read_sql(text("SELECT DISTINCT u.user_id, u.name, u.team FROM users u LEFT JOIN parent_child pc ON u.user_id = pc.child_id WHERE u.parent_id = :p OR pc.parent_id = :p"), conn, params={"p": parent_id})
     except: return pd.DataFrame()
 
+@st.cache_data(ttl=60)
 def get_all_children_in_db():
     try:
         with engine.connect() as conn: return pd.read_sql(text("SELECT user_id, name, team FROM users WHERE rolle = 'Kind' ORDER BY name"), conn)
@@ -205,6 +215,7 @@ def delete_user(user_id):
             conn.execute(text("UPDATE users SET parent_id = NULL WHERE parent_id = :id"), {"id": user_id})
             conn.execute(text("DELETE FROM task_assignments WHERE user_id = :id"), {"id": user_id})
             conn.execute(text("DELETE FROM users WHERE user_id = :id"), {"id": user_id})
+        clear_caches()
         return True, "Account gelöscht."
     except Exception as e: return False, str(e)
 
@@ -243,21 +254,25 @@ def parse_and_import_ics(file_bytes, team_str):
                         VALUES (:titel, :start, :ende, :ort, :teams)
                     """), {"titel": titel, "start": start_str, "ende": ende_str, "ort": ort, "teams": team_str})
                     events_added += 1
+        clear_caches()
         return True, f"{events_added} Termine erfolgreich für {team_str} importiert!"
     except Exception as e:
         return False, f"Fehler beim ICS Import: {e}"
 
+@st.cache_data(ttl=60)
 def get_all_events():
     try:
         with engine.connect() as conn:
             return pd.read_sql(text("SELECT * FROM events ORDER BY event_id DESC"), conn)
     except: return pd.DataFrame()
 
+@st.cache_data(ttl=60)
 def get_all_tasks():
     try:
         with engine.connect() as conn: return pd.read_sql(text("SELECT * FROM tasks ORDER BY task_id DESC"), conn)
     except: return pd.DataFrame()
 
+@st.cache_data(ttl=60)
 def get_task_assignments():
     try:
         with engine.connect() as conn:
@@ -271,6 +286,7 @@ def create_task(kategorie, beschreibung, max_helfer, user_id, start=None, ende=N
                 INSERT INTO tasks (kategorie, beschreibung, max_helfer, erstellt_von, start_zeit, ende_zeit, betroffene_teams, event_id)
                 VALUES (:kat, :besch, :max, :erst, :st, :en, :teams, :ev)
             """), {"kat": kategorie, "besch": beschreibung, "max": max_helfer, "erst": user_id, "st": start, "en": ende, "teams": teams, "ev": event_id})
+        clear_caches()
         return True, "Aufgabe erstellt!"
     except Exception as e: return False, str(e)
 
@@ -278,6 +294,7 @@ def delete_task(task_id):
     try:
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM tasks WHERE task_id = :t"), {"t": task_id})
+        clear_caches()
         return True, "Aufgabe gelöscht!"
     except: return False, "Fehler beim Löschen."
 
@@ -288,6 +305,7 @@ def delete_event(event_id):
             conn.execute(text("DELETE FROM tasks WHERE event_id = :e"), {"e": event_id})
             conn.execute(text("DELETE FROM event_attendance WHERE event_id = :e"), {"e": event_id})
             conn.execute(text("DELETE FROM events WHERE event_id = :e"), {"e": event_id})
+        clear_caches()
         return True, "Spieltag inkl. Aufgaben gelöscht!"
     except Exception as e: return False, str(e)
 
@@ -311,6 +329,7 @@ def set_event_attendance(event_id, user_id, status):
                 ON CONFLICT (event_id, user_id) 
                 DO UPDATE SET status = EXCLUDED.status
             """), {"e": event_id, "u": user_id, "s": status})
+        clear_caches()
         return True
     except Exception as e: return False
 
@@ -320,6 +339,7 @@ def accept_task(task_id, user_id):
             existing = conn.execute(text("SELECT 1 FROM task_assignments WHERE task_id = :t AND user_id = :u"), {"t": task_id, "u": user_id}).scalar()
             if existing: return False, "Bereits eingetragen!"
             conn.execute(text("INSERT INTO task_assignments (task_id, user_id) VALUES (:t, :u)"), {"t": task_id, "u": user_id})
+        clear_caches()
         return True, "Übernommen!"
     except Exception as e: return False, str(e)
 
