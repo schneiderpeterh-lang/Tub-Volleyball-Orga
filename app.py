@@ -836,7 +836,7 @@ else:
     # ----------------------------------------------------
     if tab_calendar is not None:
         with tab_calendar:
-            st.write("Chronologische Übersicht aller relevanten Termine.")
+            st.write("Chronologische Übersicht aller relevanten Termine in einem interaktiven Kalender.")
             
             filter_optionen = ["Alle meine Teams"] + TEAM_LISTE
             selected_cal_team = st.selectbox("Kalender filtern nach Team:", filter_optionen)
@@ -847,23 +847,73 @@ else:
                     if pd.isna(teams_str) or not str(teams_str).strip(): return False
                     return selected_cal_team in [t.strip() for t in str(teams_str).split(',')]
 
-            cal_data = []
+            def parse_to_iso(date_str):
+                if pd.isna(date_str) or not str(date_str).strip(): return None
+                try:
+                    clean_str = str(date_str).replace(' Uhr', '').strip()
+                    dt = pd.to_datetime(clean_str, dayfirst=True, errors='coerce')
+                    if pd.isna(dt): return None
+                    return dt.isoformat()
+                except: return None
+
+            calendar_events = []
+            
             if not events_df.empty:
                 for _, ev in events_df[events_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
-                    cal_data.append({"Datum": ev['start_zeit'], "Typ": "🏆 Spieltag", "Titel": ev['titel'], "Teams": ev['betroffene_teams']})
+                    start_iso = parse_to_iso(ev['start_zeit'])
+                    end_iso = parse_to_iso(ev.get('ende_zeit'))
+                    if start_iso:
+                        calendar_events.append({
+                            "title": f"🏆 {ev['titel']} ({ev['betroffene_teams']})",
+                            "start": start_iso,
+                            "end": end_iso if end_iso else start_iso,
+                            "backgroundColor": "#1c83e1",  # Blau für Spieltage
+                            "borderColor": "#1c83e1"
+                        })
+                        
             if not tasks_df.empty:
                 for _, tk in tasks_df[tasks_df['event_id'].isna() & tasks_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
-                    if pd.notna(tk.get('start_zeit')):
-                        cal_data.append({"Datum": tk['start_zeit'], "Typ": "📋 Aufgabe", "Titel": tk['kategorie'], "Teams": tk['betroffene_teams']})
+                    start_iso = parse_to_iso(tk.get('start_zeit'))
+                    if start_iso:
+                        calendar_events.append({
+                            "title": f"📋 {tk['kategorie']} ({tk.get('betroffene_teams', 'Alle')})",
+                            "start": start_iso,
+                            "end": start_iso,
+                            "backgroundColor": "#f9ab00",  # Orange für Aufgaben
+                            "borderColor": "#f9ab00",
+                            "textColor": "#000000"
+                        })
                         
-            if cal_data:
-                cal_df = pd.DataFrame(cal_data)
-                try:
-                    cal_df['sort_date'] = pd.to_datetime(cal_df['Datum'].str.replace(' Uhr', ''), format='%d.%m.%Y %H:%M', errors='coerce')
-                    cal_df = cal_df.sort_values(by='sort_date').drop(columns=['sort_date'])
-                except: pass
-                st.dataframe(cal_df, use_container_width=True, hide_index=True)
-            else: st.info("Keine Einträge im Kalender für diesen Filter.")
+            if calendar_events:
+                calendar_options = {
+                    "headerToolbar": {
+                        "left": "today prev,next",
+                        "center": "title",
+                        "right": "dayGridMonth,timeGridWeek,listMonth",
+                    },
+                    "initialView": "dayGridMonth",
+                    "navLinks": True,
+                    "locale": "de",
+                    "firstDay": 1, # Woche startet am Montag
+                    "buttonText": {
+                        "today": "Heute",
+                        "month": "Monat",
+                        "week": "Woche",
+                        "list": "Liste"
+                    }
+                }
+                
+                # CSS um den Kalender optisch an deine App anzupassen
+                custom_css = """
+                    .fc-event-title { font-weight: 600; font-size: 0.85em; white-space: normal; }
+                    .fc-toolbar-title { font-size: 1.2rem !important; }
+                    .fc-button { border-radius: 6px !important; }
+                    .fc-theme-standard .fc-scrollgrid { border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
+                """
+                
+                calendar(events=calendar_events, options=calendar_options, custom_css=custom_css, key=f"cal_{selected_cal_team}")
+            else: 
+                st.info("Keine Einträge im Kalender für diesen Filter.")
 
     # ----------------------------------------------------
     # TAB 4: FAMILIE
