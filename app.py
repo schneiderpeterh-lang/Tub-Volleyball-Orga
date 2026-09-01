@@ -3,9 +3,7 @@ import pandas as pd
 import datetime
 import hashlib
 import secrets
-import traceback
 import uuid
-import io
 from sqlalchemy import create_engine, text
 
 try:
@@ -14,24 +12,72 @@ except ImportError:
     st.error("📦 **Fehlendes Paket!** Bitte füge `icalendar` zu deiner `requirements.txt` auf GitHub hinzu, um den Kalender-Import zu nutzen.")
     st.stop()
 
-try:
-    from streamlit_calendar import calendar
-    HAS_CALENDAR = True
-except ImportError:
-    HAS_CALENDAR = False
-
 # ==========================================
 # 1. KONFIGURATION & DATENBANK-VERBINDUNG
 # ==========================================
 st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide")
 
+# MODERNE UI / CSS INJECTION
+def inject_custom_css():
+    st.markdown("""
+    <style>
+    /* 1. Standard-Streamlit-Branding (Menü, Footer, Header) verstecken */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    
+    /* 2. Moderne Buttons mit Schatten und Hover-Effekt */
+    .stButton > button {
+        border-radius: 8px !important;
+        transition: all 0.3s ease !important;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
+        font-weight: 500 !important;
+    }
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 10px rgba(0,0,0,0.15) !important;
+    }
+    
+    /* 3. Reiter (Tabs) optisch aufwerten */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        padding-bottom: 5px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 6px 6px 0px 0px;
+        padding: 10px 16px;
+        transition: background-color 0.3s ease;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: rgba(28, 131, 225, 0.1); /* Sanftes Blau für den aktiven Tab */
+        border-bottom: 3px solid #1c83e1;
+    }
+    
+    /* 4. Sanfte Umrandung für die Container (Kacheln) */
+    div[data-testid="stContainer"] {
+        border-radius: 12px;
+        transition: all 0.3s ease;
+    }
+    div[data-testid="stContainer"]:hover {
+        border-color: #1c83e1; /* Leuchtet leicht blau beim Hovern */
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# CSS direkt laden
+inject_custom_css()
+
 # CACHING DER DATENBANKVERBINDUNG
 @st.cache_resource
 def get_database_engine():
     try:
-        DB_URL = st.secrets["DB_URL"]
+        # Wir nutzen Port 5432 und die direkte Domain, um Pooler-Probleme zu umgehen
+        db_url = st.secrets["DB_URL"].replace("6543", "5432")
+        if db_url.startswith("postgres://"):
+            db_url = db_url.replace("postgres://", "postgresql://")
+            
         return create_engine(
-            DB_URL, 
+            db_url, 
             connect_args={"sslmode": "require", "connect_timeout": 15},
             pool_pre_ping=True
         )
@@ -85,16 +131,17 @@ def update_db_schema(_engine):
             );
         """))
         
-        # Updates für Tasks
+        # Updates für Tasks (inkl. max_helfer Sicherheitscheck)
         try:
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS start_zeit TEXT;"))
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ende_zeit TEXT;"))
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS betroffene_teams TEXT;"))
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS max_helfer INTEGER DEFAULT 1;"))
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS erstellt_von INTEGER REFERENCES users(user_id);"))
-        except Exception: pass
+        except Exception as e: 
+            print("Tasks Alter:", e)
 
-        # Updates für Events (um ICS Daten sauber zu speichern)
+        # Updates für Events
         try:
             conn.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS titel TEXT;"))
             conn.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS start_zeit TEXT;"))
@@ -286,7 +333,8 @@ def get_all_events():
 @st.cache_data(ttl=60)
 def get_all_tasks():
     try:
-        with engine.connect() as conn: return pd.read_sql(text("SELECT * FROM tasks ORDER BY task_id DESC"), conn)
+        with engine.connect() as conn: 
+            return pd.read_sql(text("SELECT task_id, event_id, kategorie, beschreibung, max_helfer, erstellt_von, start_zeit, ende_zeit, betroffene_teams FROM tasks ORDER BY task_id DESC"), conn)
     except: return pd.DataFrame()
 
 @st.cache_data(ttl=60)
@@ -321,10 +369,11 @@ def create_task(kategorie, beschreibung, max_helfer, user_id, start=None, ende=N
 def delete_task(task_id):
     try:
         with engine.begin() as conn:
+            conn.execute(text("DELETE FROM task_assignments WHERE task_id = :t"), {"t": task_id})
             conn.execute(text("DELETE FROM tasks WHERE task_id = :t"), {"t": task_id})
         clear_caches()
         return True, "Aufgabe gelöscht!"
-    except: return False, "Fehler beim Löschen."
+    except Exception as e: return False, str(e)
 
 def delete_event(event_id):
     try:
@@ -363,7 +412,7 @@ def accept_task(task_id, user_id):
 # 5. UI COMPONENTS
 # ==========================================
 st.title("🏐 TuB Helfer-Orga")
-TEAM_LISTE = ["U12", "U13", "U14", "U16", "U18", "U20", "Herren 1", "Herren 2", "Herren 3", "Herren 4"]
+TEAM_LISTE = ["U12", "U13", "U14", "U16", "U18", "U20", "Herren 1", "Herren 2", "Herren 3", "Herren 4", "Damen 1"]
 
 if 'logged_in_user' not in st.session_state:
     st.session_state['logged_in_user'] = None
@@ -397,12 +446,15 @@ elif st.session_state['logged_in_user'] is None:
 
 else:
     user = st.session_state['logged_in_user']
-    st.write(f"Willkommen zurück, **{user['name']}** - {user['rolle']}!")
-    if st.button("🚪 Ausloggen"):
-        st.session_state['logged_in_user'] = None
-        st.rerun()
+    col_w, col_logout = st.columns([5, 1])
+    with col_w:
+        st.write(f"Willkommen zurück, **{user['name']}** - {user['rolle']}!")
+    with col_logout:
+        if st.button("🚪 Ausloggen", use_container_width=True):
+            st.session_state['logged_in_user'] = None
+            st.rerun()
 
-    # BÜNDEL-LADEN: Alle Daten werden gecacht geladen. Keine N+1 Queries mehr im UI!
+    # BÜNDEL-LADEN: Alle Daten werden gecacht geladen. Keine N+1 Queries!
     children_df = get_children(user['user_id'])
     tasks_df = get_all_tasks()
     assign_df = get_task_assignments()
@@ -418,31 +470,157 @@ else:
             if c.get('team') and c['team'] != "Kein Team": my_teams.update([t.strip() for t in c['team'].split(',')])
     
     def is_relevant(teams_str):
+        # Admins und Organisatoren sehen immer ALLE Teams in der Übersicht
         if user['rolle'] in ['Admin', 'Organisator']: 
             return True
-        if pd.isna(teams_str) or not str(teams_str).strip(): return True
+        if pd.isna(teams_str) or not str(teams_str).strip(): 
+            return True # Allgemeine Vereins-Termine
         return any(t.strip() in my_teams for t in str(teams_str).split(','))
 
-    tab_titles = ["🏆 Spieltage & Events", "📋 Freie Aufgaben", "📅 Kalender-Ansicht", "👨‍👩‍👧 Familie"]
-    if user['rolle'] == 'Admin': tab_titles.append("👥 Admin")
+    # DYNAMISCHE TABS AUFBAUEN
+    tab_titles = ["🏠 Übersicht", "🏆 Spieltage & Events", "📋 Freie Aufgaben"]
+    
+    if user['rolle'] != 'Elternteil':
+        tab_titles.append("📅 Kalender-Ansicht")
+        
+    tab_titles.append("👨‍👩‍👧 Familie")
+    
+    if user['rolle'] == 'Admin':
+        tab_titles.append("👥 Admin")
+        
     tabs = st.tabs(tab_titles)
+    
+    # Tabs sicher zuweisen basierend auf der dynamischen Liste
+    tab_idx = 0
+    tab_overview = tabs[tab_idx]; tab_idx += 1
+    tab_events = tabs[tab_idx]; tab_idx += 1
+    tab_tasks = tabs[tab_idx]; tab_idx += 1
+    
+    if user['rolle'] != 'Elternteil':
+        tab_calendar = tabs[tab_idx]; tab_idx += 1
+    else:
+        tab_calendar = None
+        
+    tab_family = tabs[tab_idx]; tab_idx += 1
+    
+    if user['rolle'] == 'Admin':
+        tab_admin = tabs[tab_idx]; tab_idx += 1
+    else:
+        tab_admin = None
 
     if 'selected_event_team' not in st.session_state:
         st.session_state['selected_event_team'] = None
 
     # ----------------------------------------------------
+    # TAB 0: ÜBERSICHT (DASHBOARD)
+    # ----------------------------------------------------
+    with tab_overview:
+        st.write("Dein schneller Überblick: Wo wird aktuell Hilfe gebraucht und wofür bist du schon eingetragen?")
+        st.write("")
+        
+        my_family_uids = [user['user_id']]
+        if not children_df.empty:
+            my_family_uids.extend(children_df['user_id'].tolist())
+            
+        my_assigned_tids = assign_df[assign_df['user_id'].isin(my_family_uids)]['task_id'].tolist() if not assign_df.empty else []
+        
+        col1, col2 = st.columns(2)
+        
+        # Spalte 1: Offene Aufgaben
+        with col1:
+            st.markdown("#### 🚨 Hilfe dringend gesucht")
+            found_open = False
+            if not tasks_df.empty:
+                for _, tsk in tasks_df.iterrows():
+                    if is_relevant(tsk.get('betroffene_teams')):
+                        t_id = tsk['task_id']
+                        t_assigns = assign_df[assign_df['task_id'] == t_id] if not assign_df.empty else pd.DataFrame()
+                        cur_h = len(t_assigns)
+                        max_h = int(tsk.get('max_helfer', 1))
+                        
+                        if cur_h < max_h:
+                            found_open = True
+                            
+                            # Kontext ermitteln (Event oder Frei)
+                            context = ""
+                            date_str = ""
+                            if pd.notna(tsk.get('event_id')):
+                                ev_row = events_df[events_df['event_id'] == tsk['event_id']]
+                                if not ev_row.empty:
+                                    context = f"🏆 {ev_row.iloc[0]['titel']}"
+                                    date_str = ev_row.iloc[0]['start_zeit']
+                            else:
+                                context = "📋 Freie Aufgabe"
+                                date_str = tsk.get('start_zeit', 'Kein Datum')
+                                
+                            with st.container(border=True):
+                                st.write(f"**{tsk['kategorie']}**")
+                                st.caption(f"{context} | 🗓️ {date_str}")
+                                st.write(f"👥 Belegt: {cur_h} / {max_h}")
+                                
+                                options = {user['user_id']: "Ich selbst"}
+                                if not children_df.empty:
+                                    for _, child in children_df.iterrows(): options[child['user_id']] = f"Kind: {child['name']}"
+                                if not t_assigns.empty:
+                                    options = {k: v for k, v in options.items() if k not in t_assigns['user_id'].tolist()}
+                                
+                                if options:
+                                    c_sel, c_btn = st.columns([2, 1])
+                                    with c_sel:
+                                        sel_u = st.selectbox("Wer?", list(options.keys()), format_func=lambda x: options[x], key=f"dash_sel_{t_id}", label_visibility="collapsed")
+                                    with c_btn:
+                                        if st.button("Übernehmen", key=f"dash_btn_{t_id}", use_container_width=True):
+                                            success, msg = accept_task(t_id, sel_u)
+                                            if success: st.success(msg); st.rerun()
+                                else:
+                                    st.success("✅ Du & Familie seid bereits eingetragen.")
+                                    
+            if not found_open:
+                st.success("Aktuell sind alle Aufgaben für deine Teams belegt. Super!")
+
+        # Spalte 2: Eigene Aufgaben
+        with col2:
+            st.markdown("#### ✅ Deine übernommenen Aufgaben")
+            if my_assigned_tids:
+                for t_id in my_assigned_tids:
+                    tsk_row = tasks_df[tasks_df['task_id'] == t_id]
+                    if not tsk_row.empty:
+                        tsk = tsk_row.iloc[0]
+                        # Finde heraus, wer aus der Familie den Job hat
+                        fam_assigns = assign_df[(assign_df['task_id'] == t_id) & (assign_df['user_id'].isin(my_family_uids))]
+                        who_list = fam_assigns['assignee_name'].tolist()
+                        
+                        context = ""
+                        date_str = ""
+                        if pd.notna(tsk.get('event_id')):
+                            ev_row = events_df[events_df['event_id'] == tsk['event_id']]
+                            if not ev_row.empty:
+                                context = f"🏆 {ev_row.iloc[0]['titel']}"
+                                date_str = ev_row.iloc[0]['start_zeit']
+                        else:
+                            context = "📋 Freie Aufgabe"
+                            date_str = tsk.get('start_zeit', 'Kein Datum')
+                            
+                        with st.container(border=True):
+                            st.write(f"**{tsk['kategorie']}**")
+                            st.caption(f"{context} | 🗓️ {date_str}")
+                            st.write(f"👷‍♂️ **Eingetragen:** {', '.join(who_list)}")
+            else:
+                st.info("Du bist aktuell für keine anstehenden Aufgaben eingetragen.")
+
+
+    # ----------------------------------------------------
     # TAB 1: SPIELTAGE & EVENTS
     # ----------------------------------------------------
-    with tabs[0]:
+    with tab_events:
         st.write("Wähle eine Altersklasse/ein Team, um die Termine zu sehen.")
         
         rel_events = events_df[events_df['betroffene_teams'].apply(is_relevant)] if not events_df.empty else pd.DataFrame()
         
-        # Admin Optionen schnell aus gecachtem DataFrame bauen (Keine Extra-Datenbankabfrage!)
+        # Admin Optionen
         admin_options = {}
-        if user['rolle'] in ['Admin', 'Organisator']:
-            if not all_users_df.empty:
-                admin_options = {row['user_id']: f"Admin-Zuweisung: {row['name']}" for _, row in all_users_df.iterrows()}
+        if user['rolle'] in ['Admin', 'Organisator'] and not all_users_df.empty:
+            admin_options = {row['user_id']: f"Admin-Zuweisung: {row['name']}" for _, row in all_users_df.iterrows()}
             
         def render_event_list(events_to_show):
             for _, ev in events_to_show.iterrows():
@@ -450,7 +628,7 @@ else:
                 with st.expander(f"🏐 {ev['titel']} ({ev['start_zeit']})", expanded=False):
                     st.write(f"📍 **Ort:** {ev['ort']} | 👕 **Teams:** {ev['betroffene_teams']}")
                     
-                    # --- TEILNAHME (ATTENDANCE) - Ultraschnell aus gecachtem DataFrame gefiltert ---
+                    # --- TEILNAHME (ATTENDANCE) ---
                     st.markdown("#### 🏃‍♂️ Spieler-Teilnahme")
                     attendance_df = all_attendance_df[all_attendance_df['event_id'] == ev_id] if not all_attendance_df.empty else pd.DataFrame()
                     
@@ -465,11 +643,9 @@ else:
                     else:
                         st.info("Noch keine Rückmeldungen für diesen Spieltag.")
                     
-                    # Dropdown für Teilnahme
                     att_options = {user['user_id']: "Ich selbst"}
                     if not children_df.empty:
-                        for _, child in children_df.iterrows(): 
-                            att_options[child['user_id']] = f"Kind: {child['name']}"
+                        for _, child in children_df.iterrows(): att_options[child['user_id']] = f"Kind: {child['name']}"
                     
                     if user['rolle'] in ['Admin', 'Organisator']:
                         for uid, uname in admin_options.items():
@@ -489,10 +665,10 @@ else:
                             
                     st.divider()
                     
-                    # Tasks aus gecachtem DataFrame
+                    # --- AUFGABEN ---
                     ev_tasks = tasks_df[tasks_df['event_id'] == ev_id] if not tasks_df.empty else pd.DataFrame()
-                    
                     st.markdown("#### Organisation & Aufgaben:")
+                    
                     if not ev_tasks.empty:
                         for _, tsk in ev_tasks.iterrows():
                             t_id = tsk['task_id']
@@ -518,7 +694,7 @@ else:
                                         if st.button("Eintragen", key=f"btn_ev_{t_id}"):
                                             success, msg = accept_task(t_id, sel_u)
                                             if success: st.success(msg); st.rerun()
-                                    else: st.success("✅ Du bist eingetragen.")
+                                    else: st.success("✅ Familie komplett eingetragen.")
                                 else: st.success("✅ Voll belegt.")
                                 
                                 if user['rolle'] in ['Admin', 'Organisator'] or tsk.get('erstellt_von') == user['user_id']:
@@ -602,7 +778,7 @@ else:
     # ----------------------------------------------------
     # TAB 2: FREIE AUFGABEN
     # ----------------------------------------------------
-    with tabs[1]:
+    with tab_tasks:
         if user['rolle'] in ['Admin', 'Organisator']:
             with st.expander("➕ Allgemeine Aufgabe anlegen (Ohne Event-Bezug)"):
                 with st.form("new_task_form"):
@@ -622,6 +798,8 @@ else:
         
         if not free_tasks.empty:
             for _, row in free_tasks.iterrows():
+                if not is_relevant(row.get('betroffene_teams')): continue
+                
                 t_id = row['task_id']
                 t_assigns = assign_df[assign_df['task_id'] == t_id] if not assign_df.empty else pd.DataFrame()
                 cur_h, max_h = len(t_assigns), int(row.get('max_helfer', 1))
@@ -654,41 +832,43 @@ else:
         else: st.info("Aktuell keine allgemeinen Aufgaben.")
 
     # ----------------------------------------------------
-    # TAB 3: KALENDER
+    # TAB 3: KALENDER (Nicht für Elternteile)
     # ----------------------------------------------------
-    with tabs[2]:
-        st.write("Chronologische Übersicht der Termine (Events & Aufgaben).")
-        filter_optionen = ["Alle meine Teams"] + TEAM_LISTE
-        selected_cal_team = st.selectbox("Kalender filtern nach Team:", filter_optionen)
-        
-        def cal_is_relevant(teams_str):
-            if selected_cal_team == "Alle meine Teams": return is_relevant(teams_str)
-            else:
-                if pd.isna(teams_str) or not str(teams_str).strip(): return False
-                return selected_cal_team in [t.strip() for t in str(teams_str).split(',')]
+    if tab_calendar is not None:
+        with tab_calendar:
+            st.write("Chronologische Übersicht aller relevanten Termine.")
+            
+            filter_optionen = ["Alle meine Teams"] + TEAM_LISTE
+            selected_cal_team = st.selectbox("Kalender filtern nach Team:", filter_optionen)
+            
+            def cal_is_relevant(teams_str):
+                if selected_cal_team == "Alle meine Teams": return is_relevant(teams_str)
+                else:
+                    if pd.isna(teams_str) or not str(teams_str).strip(): return False
+                    return selected_cal_team in [t.strip() for t in str(teams_str).split(',')]
 
-        cal_data = []
-        if not events_df.empty:
-            for _, ev in events_df[events_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
-                cal_data.append({"Datum": ev['start_zeit'], "Typ": "🏆 Spieltag", "Titel": ev['titel'], "Teams": ev['betroffene_teams']})
-        if not tasks_df.empty:
-            for _, tk in tasks_df[tasks_df['event_id'].isna() & tasks_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
-                if pd.notna(tk.get('start_zeit')):
-                    cal_data.append({"Datum": tk['start_zeit'], "Typ": "📋 Aufgabe", "Titel": tk['kategorie'], "Teams": tk['betroffene_teams']})
-                    
-        if cal_data:
-            cal_df = pd.DataFrame(cal_data)
-            try:
-                cal_df['sort_date'] = pd.to_datetime(cal_df['Datum'].str.replace(' Uhr', ''), format='%d.%m.%Y %H:%M', errors='coerce')
-                cal_df = cal_df.sort_values(by='sort_date').drop(columns=['sort_date'])
-            except: pass
-            st.dataframe(cal_df, use_container_width=True, hide_index=True)
-        else: st.info("Keine Einträge im Kalender.")
+            cal_data = []
+            if not events_df.empty:
+                for _, ev in events_df[events_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
+                    cal_data.append({"Datum": ev['start_zeit'], "Typ": "🏆 Spieltag", "Titel": ev['titel'], "Teams": ev['betroffene_teams']})
+            if not tasks_df.empty:
+                for _, tk in tasks_df[tasks_df['event_id'].isna() & tasks_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
+                    if pd.notna(tk.get('start_zeit')):
+                        cal_data.append({"Datum": tk['start_zeit'], "Typ": "📋 Aufgabe", "Titel": tk['kategorie'], "Teams": tk['betroffene_teams']})
+                        
+            if cal_data:
+                cal_df = pd.DataFrame(cal_data)
+                try:
+                    cal_df['sort_date'] = pd.to_datetime(cal_df['Datum'].str.replace(' Uhr', ''), format='%d.%m.%Y %H:%M', errors='coerce')
+                    cal_df = cal_df.sort_values(by='sort_date').drop(columns=['sort_date'])
+                except: pass
+                st.dataframe(cal_df, use_container_width=True, hide_index=True)
+            else: st.info("Keine Einträge im Kalender für diesen Filter.")
 
     # ----------------------------------------------------
     # TAB 4: FAMILIE
     # ----------------------------------------------------
-    with tabs[3]:
+    with tab_family:
         with st.form("add_c"):
             c1, c2 = st.columns(2)
             with c1: cn = st.text_input("Name Kind")
@@ -706,7 +886,7 @@ else:
     # ----------------------------------------------------
     # TAB 5: ADMIN
     # ----------------------------------------------------
-    if user['rolle'] == 'Admin':
+    if tab_admin is not None:
         with tab_admin:
             st.subheader("📅 ICS Kalender-Import")
             st.write("Lade hier den Spielplan (ICS-Datei aus SAMS/Web) eines Teams hoch. Daraus werden automatisch 'Events' erstellt.")
@@ -722,8 +902,6 @@ else:
                     
             st.divider()
             st.subheader("👥 User-Verwaltung")
-            
-            # Nutzt jetzt den gecachten DataFrame (keine Extra-Datenbankabfrage)
             st.dataframe(all_users_df, use_container_width=True)
             with st.form("del_u"):
                 opts = {r['user_id']: f"{r['name']} ({r['rolle']})" for _, r in all_users_df.iterrows()}
