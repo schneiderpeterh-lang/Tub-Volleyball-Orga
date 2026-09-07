@@ -482,15 +482,38 @@ elif st.session_state['logged_in_user'] is None:
                     st.session_state['logged_in_user'] = user
                     st.rerun()
                 else: st.error("Zugangsdaten ungültig.")
-    with t_reg:
+with t_reg:
         with st.form("reg"):
             n, e, p = st.text_input("Name"), st.text_input("E-Mail"), st.text_input("Passwort", type="password")
             r, t = st.selectbox("Rolle", ["Spieler", "Trainer", "Elternteil", "Organisator"]), st.multiselect("Team", TEAM_LISTE)
-            dsgvo = st.checkbox("DSGVO zustimmen")
-            if st.form_submit_button("Registrieren") and dsgvo and n and e and p:
-                succ, msg = register_new_user(n, e, p, r, t)
-                if succ: st.success(msg)
-                else: st.error(msg)
+            
+            st.markdown("---")
+            # Aufklappbarer Datenschutz-Hinweis direkt im Formular
+            with st.expander("🛡️ Datenschutzhinweise anzeigen"):
+                st.markdown("""
+                **Zweck der Datenspeicherung:**
+                Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben.
+                
+                **Sicherheit:**
+                Die Daten werden sicher und verschlüsselt auf europäischen Servern gespeichert. Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten.
+                """)
+            
+            # Die Checkbox darunter
+            dsgvo = st.checkbox("Ich habe die Datenschutzhinweise gelesen und stimme der Verarbeitung meiner Daten zu.")
+            st.markdown("---")
+            
+            # Verbesserte Fehlerabfrage beim Klick auf Registrieren
+            if st.form_submit_button("Registrieren"):
+                if not dsgvo:
+                    st.warning("⚠️ Bitte stimme den Datenschutzrichtlinien zu, um dich zu registrieren.")
+                elif not (n and e and p):
+                    st.warning("⚠️ Bitte fülle alle Pflichtfelder (Name, E-Mail, Passwort) aus.")
+                else:
+                    succ, msg = register_new_user(n, e, p, r, t)
+                    if succ: 
+                        st.success(msg)
+                    else: 
+                        st.error(msg)
 
 else:
     user = st.session_state['logged_in_user']
