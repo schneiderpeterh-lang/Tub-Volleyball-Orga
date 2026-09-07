@@ -63,7 +63,7 @@ with st.sidebar:
         """)
         
     st.divider()
-    st.caption("App-Version 1.0 | Status: Online 🟢")
+    st.caption("App-Version 1.1 | Status: Online 🟢")
 
 # MODERNE UI / CSS INJECTION
 def inject_custom_css():
@@ -242,6 +242,16 @@ def verify_password(password: str, hashed_password: str) -> bool:
     salt, hash_hex = hashed_password.split('$')
     hash_obj = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
     return hash_obj.hex() == hash_hex
+
+def reset_password(user_id, new_password):
+    hashed = hash_password(new_password)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE users SET password_hash = :h WHERE user_id = :u"), {"h": hashed, "u": user_id})
+        clear_caches()
+        return True, "Passwort erfolgreich geändert!"
+    except Exception as e: 
+        return False, str(e)
 
 def clear_caches():
     st.cache_data.clear()
@@ -484,6 +494,10 @@ elif st.session_state['logged_in_user'] is None:
                     st.rerun()
                 else: 
                     st.error("Zugangsdaten ungültig.")
+                    
+        # NEU: Passwort-vergessen-Button
+        if st.button("Passwort vergessen?", use_container_width=True):
+            st.info("💡 **Passwort vergessen?** Bitte sprich einen Trainer oder Administrator an. Diese können dir in Sekunden ein neues Passwort vergeben.")
                     
     with t_reg:
         with st.form("reg"):
@@ -1024,6 +1038,25 @@ else:
             st.divider()
             st.subheader("👥 User-Verwaltung")
             st.dataframe(all_users_df, use_container_width=True)
+            
+            st.divider()
+            st.subheader("🔑 Passwort zurücksetzen")
+            st.write("Vergib hier ein neues Passwort für Nutzer, die ihres vergessen haben.")
+            with st.form("reset_pw_form"):
+                opts = {r['user_id']: f"{r['name']} ({r['email']})" for _, r in all_users_df.iterrows()}
+                reset_id = st.selectbox("Benutzer auswählen:", list(opts.keys()), format_func=lambda x: opts[x])
+                new_pw = st.text_input("Neues Passwort", type="password")
+                
+                if st.form_submit_button("Passwort überschreiben"):
+                    if new_pw.strip() == "":
+                        st.warning("Bitte ein gültiges Passwort eingeben.")
+                    else:
+                        succ, msg = reset_password(reset_id, new_pw)
+                        if succ: 
+                            st.success(f"{msg} Der Nutzer kann sich nun mit dem neuen Passwort einloggen.")
+                        else: 
+                            st.error(msg)
+
             with st.form("del_u"):
                 opts = {r['user_id']: f"{r['name']} ({r['rolle']})" for _, r in all_users_df.iterrows()}
                 d_id = st.selectbox("Löschen:", list(opts.keys()), format_func=lambda x: opts[x])
