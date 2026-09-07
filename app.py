@@ -1011,3 +1011,26 @@ else:
                 d_id = st.selectbox("Löschen:", list(opts.keys()), format_func=lambda x: opts[x])
                 if st.form_submit_button("User Löschen") and d_id != user['user_id']:
                     delete_user(d_id); st.rerun()
+
+# -----------------------------------------------------------------------------
+# FOOTER: IMPRESSUM & DATENSCHUTZ (Fusszeile)
+# -----------------------------------------------------------------------------
+st.markdown("---")
+footer_col1, footer_col2, footer_col3 = st.columns([2, 2, 1])
+
+with footer_col1:
+    st.caption("🏐 **TuB Bocholt – Volleyball**")
+    st.caption("Lowicker Str. 19c, 46395 Bocholt")
+
+with footer_col2:
+    with st.expander("⚖️ Impressum & Datenschutz lesen"):
+        st.markdown("""
+        **Impressum**
+        Vertreten durch die Abteilungsleitung Volleyball.
+        
+        **Datenschutz**
+        Deine Daten (Name, E-Mail, Team) werden ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben auf sicheren europäischen Servern gespeichert. Du kannst deine Daten jederzeit löschen lassen.
+        """)
+
+with footer_col3:
+    st.caption("Status: Online 🟢")
