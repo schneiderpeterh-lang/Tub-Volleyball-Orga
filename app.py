@@ -22,6 +22,27 @@ except ImportError:
 # 1. KONFIGURATION & DATENBANK-VERBINDUNG
 # ==========================================
 st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide")
+# -----------------------------------------------------------------------------
+# SEITENLEISTE (SIDEBAR) IMMER SICHTBAR MACHEN
+# -----------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown("### 🏐 TuB Bocholt")
+    st.markdown("Helfer-Organisation & Vereinsheim")
+    st.markdown("---")
+    
+    with st.expander("⚖️ Impressum & Datenschutz", expanded=False):
+        st.markdown("""
+        **Impressum**
+        TuB Bocholt – Abteilung Volleyball
+        Lowicker Str. 19c
+        46395 Bocholt
+        Vertreten durch: Abteilungsleitung
+        
+        **Datenschutz**
+        Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben. 
+        Die Daten werden sicher und verschlüsselt auf europäischen Servern gespeichert. 
+        Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten.
+        """)
 
 # MODERNE UI / CSS INJECTION
 def inject_custom_css():
