@@ -21,7 +21,12 @@ except ImportError:
 # ==========================================
 # 1. KONFIGURATION & DATENBANK-VERBINDUNG
 # ==========================================
-st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide")
+st.set_page_config(
+    page_title="TuB Orga", 
+    page_icon="🏐", 
+    layout="wide", 
+    initial_sidebar_state="expanded"
+)
 # -----------------------------------------------------------------------------
 # SEITENLEISTE (SIDEBAR) IMMER SICHTBAR MACHEN
 # -----------------------------------------------------------------------------
