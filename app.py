@@ -418,6 +418,27 @@ def accept_task(task_id, user_id):
 # 5. UI COMPONENTS
 # ==========================================
 st.title("🏐 TuB Helfer-Orga")
+# ------------------------------------------------=================
+# SEITENLEISTE: IMPRESSUM & DATENSCHUTZ
+# ------------------------------------------------=================
+with st.sidebar:
+    st.markdown("### 🏐 TuB Bocholt")
+    st.markdown("Helfer-Organisation & Vereinsheim")
+    st.markdown("---")
+    
+    with st.expander("⚖️ Impressum & Datenschutz"):
+        st.markdown("""
+        **Impressum**
+        TuB Bocholt – Abteilung Volleyball
+        Lowicker Str. 19c
+        46395 Bocholt
+        Vertreten durch: Abteilungsleitung
+        
+        **Datenschutz**
+        Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben. 
+        Die Daten werden sicher und verschlüsselt auf europäischen Servern gespeichert. 
+        Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten.
+        """)
 TEAM_LISTE = ["U12", "U13", "U14", "U16", "U18", "U20", "Herren 1", "Herren 2", "Herren 3", "Herren 4", "Damen 1"]
 
 if 'logged_in_user' not in st.session_state:
