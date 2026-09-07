@@ -21,42 +21,58 @@ except ImportError:
 # ==========================================
 # 1. KONFIGURATION & DATENBANK-VERBINDUNG
 # ==========================================
-st.set_page_config(
-    page_title="TuB Orga", 
-    page_icon="🏐", 
-    layout="wide", 
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide", initial_sidebar_state="expanded")
+
 # -----------------------------------------------------------------------------
-# SEITENLEISTE (SIDEBAR) IMMER SICHTBAR MACHEN
+# SEITENLEISTE (UMFANGREICHES IMPRESSUM & DATENSCHUTZ)
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("### 🏐 TuB Bocholt")
-    st.markdown("Helfer-Organisation & Vereinsheim")
-    st.markdown("---")
+    st.title("🏐 TuB Bocholt")
+    st.markdown("### Helfer-Organisation")
     
-    with st.expander("⚖️ Impressum & Datenschutz", expanded=False):
+    st.markdown("Hier organisieren wir unsere Spieltage, Turniere und Aufgaben im Verein.")
+    st.divider()
+    
+    st.markdown("#### Rechtliches")
+    
+    with st.expander("⚖️ Impressum", expanded=False):
         st.markdown("""
-        **Impressum**
-        TuB Bocholt – Abteilung Volleyball
+        **TuB Bocholt 1907 e.V.**
+        Abteilung Volleyball
         Lowicker Str. 19c
         46395 Bocholt
-        Vertreten durch: Abteilungsleitung
         
-        **Datenschutz**
-        Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben. 
-        Die Daten werden sicher und verschlüsselt auf europäischen Servern gespeichert. 
-        Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten.
+        **Vertreten durch:**
+        Abteilungsleitung Volleyball
+        
+        **Kontakt:**
+        E-Mail: info@tub-bocholt-volleyball.de
+        Web: www.tub-bocholt-volleyball.de
         """)
+        
+    with st.expander("🛡️ Datenschutz", expanded=False):
+        st.markdown("""
+        **Zweck der Datenspeicherung:**
+        Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben.
+        
+        **Sicherheit & Hosting:**
+        Die Daten werden sicher und verschlüsselt in einer Supabase-Datenbank auf europäischen Servern (Irland/Frankfurt) gespeichert.
+        
+        **Deine Rechte:**
+        Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten. Schreibe uns dazu einfach eine kurze E-Mail oder bitte einen Admin um die Löschung deines Accounts.
+        """)
+        
+    st.divider()
+    st.caption("App-Version 1.0 | Status: Online 🟢")
 
 # MODERNE UI / CSS INJECTION
 def inject_custom_css():
     st.markdown("""
     <style>
-    /* 1. Standard-Streamlit-Branding (Menü, Footer, Header) verstecken */
+    /* 1. Standard-Streamlit-Branding (Menü, Footer) verstecken */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
+    /* header {visibility: hidden;} <-- Auskommentiert, damit der Ausklapp-Pfeil sichtbar bleibt! */
     
     /* 2. Moderne Buttons mit Schatten und Hover-Effekt */
     .stButton > button {
@@ -444,27 +460,6 @@ def accept_task(task_id, user_id):
 # 5. UI COMPONENTS
 # ==========================================
 st.title("🏐 TuB Helfer-Orga")
-# ------------------------------------------------=================
-# SEITENLEISTE: IMPRESSUM & DATENSCHUTZ
-# ------------------------------------------------=================
-with st.sidebar:
-    st.markdown("### 🏐 TuB Bocholt")
-    st.markdown("Helfer-Organisation & Vereinsheim")
-    st.markdown("---")
-    
-    with st.expander("⚖️ Impressum & Datenschutz"):
-        st.markdown("""
-        **Impressum**
-        TuB Bocholt – Abteilung Volleyball
-        Lowicker Str. 19c
-        46395 Bocholt
-        Vertreten durch: Abteilungsleitung
-        
-        **Datenschutz**
-        Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben. 
-        Die Daten werden sicher und verschlüsselt auf europäischen Servern gespeichert. 
-        Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten.
-        """)
 TEAM_LISTE = ["U12", "U13", "U14", "U16", "U18", "U20", "Herren 1", "Herren 2", "Herren 3", "Herren 4", "Damen 1"]
 
 if 'logged_in_user' not in st.session_state:
@@ -1011,26 +1006,3 @@ else:
                 d_id = st.selectbox("Löschen:", list(opts.keys()), format_func=lambda x: opts[x])
                 if st.form_submit_button("User Löschen") and d_id != user['user_id']:
                     delete_user(d_id); st.rerun()
-
-# -----------------------------------------------------------------------------
-# FOOTER: IMPRESSUM & DATENSCHUTZ (Fusszeile)
-# -----------------------------------------------------------------------------
-st.markdown("---")
-footer_col1, footer_col2, footer_col3 = st.columns([2, 2, 1])
-
-with footer_col1:
-    st.caption("🏐 **TuB Bocholt – Volleyball**")
-    st.caption("Lowicker Str. 19c, 46395 Bocholt")
-
-with footer_col2:
-    with st.expander("⚖️ Impressum & Datenschutz lesen"):
-        st.markdown("""
-        **Impressum**
-        Vertreten durch die Abteilungsleitung Volleyball.
-        
-        **Datenschutz**
-        Deine Daten (Name, E-Mail, Team) werden ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben auf sicheren europäischen Servern gespeichert. Du kannst deine Daten jederzeit löschen lassen.
-        """)
-
-with footer_col3:
-    st.caption("Status: Online 🟢")
