@@ -1,10 +1,9 @@
 import streamlit as st
 import pandas as pd
 import datetime
-import hashlib
-import secrets
 import uuid
 from sqlalchemy import create_engine, text
+from supabase import create_client, Client
 
 try:
     import icalendar
@@ -63,7 +62,7 @@ with st.sidebar:
         """)
         
     st.divider()
-    st.caption("App-Version 1.1 | Status: Online 🟢")
+    st.caption("App-Version 2.0 (Supabase Auth) | Status: Online 🟢")
 
 # MODERNE UI / CSS INJECTION
 def inject_custom_css():
@@ -72,7 +71,6 @@ def inject_custom_css():
     /* 1. Standard-Streamlit-Branding (Menü, Footer) verstecken */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    /* header {visibility: hidden;} <-- Auskommentiert, damit der Ausklapp-Pfeil sichtbar bleibt! */
     
     /* 2. Moderne Buttons mit Schatten und Hover-Effekt */
     .stButton > button {
@@ -97,7 +95,7 @@ def inject_custom_css():
         transition: background-color 0.3s ease;
     }
     .stTabs [aria-selected="true"] {
-        background-color: rgba(28, 131, 225, 0.1); /* Sanftes Blau für den aktiven Tab */
+        background-color: rgba(28, 131, 225, 0.1); 
         border-bottom: 3px solid #1c83e1;
     }
     
@@ -107,7 +105,7 @@ def inject_custom_css():
         transition: all 0.3s ease;
     }
     div[data-testid="stContainer"]:hover {
-        border-color: #1c83e1; /* Leuchtet leicht blau beim Hovern */
+        border-color: #1c83e1;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -115,11 +113,23 @@ def inject_custom_css():
 # CSS direkt laden
 inject_custom_css()
 
-# CACHING DER DATENBANKVERBINDUNG
+# SUPABASE AUTH CLIENT INITIALISIEREN
+@st.cache_resource
+def init_supabase() -> Client:
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
+    return create_client(url, key)
+
+try:
+    supabase = init_supabase()
+except Exception as e:
+    st.error(f"Fehler bei Supabase-Initialisierung: {e}")
+    st.stop()
+
+# CACHING DER DATENBANKVERBINDUNG (SQLAlchemy für Tabellen & Nutzerprofile)
 @st.cache_resource
 def get_database_engine():
     try:
-        # Wir nutzen Port 5432 und die direkte Domain, um Pooler-Probleme zu umgehen
         db_url = st.secrets["DB_URL"].replace("6543", "5432")
         if db_url.startswith("postgres://"):
             db_url = db_url.replace("postgres://", "postgresql://")
@@ -179,17 +189,14 @@ def update_db_schema(_engine):
             );
         """))
         
-        # Updates für Tasks (inkl. max_helfer Sicherheitscheck)
         try:
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS start_zeit TEXT;"))
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ende_zeit TEXT;"))
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS betroffene_teams TEXT;"))
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS max_helfer INTEGER DEFAULT 1;"))
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS erstellt_von INTEGER REFERENCES users(user_id);"))
-        except Exception as e: 
-            print("Tasks Alter:", e)
+        except Exception: pass
 
-        # Updates für Events
         try:
             conn.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS titel TEXT;"))
             conn.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS start_zeit TEXT;"))
@@ -230,36 +237,15 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 3. KRYPTOGRAFIE & USER-VERWALTUNG
+# 3. KRYPTOGRAFIE & USER-VERWALTUNG (Neu mit Supabase Auth)
 # ==========================================
-def hash_password(password: str) -> str:
-    salt = secrets.token_hex(16)
-    hash_obj = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
-    return f"{salt}${hash_obj.hex()}"
-
-def verify_password(password: str, hashed_password: str) -> bool:
-    if "$" not in hashed_password: return password == hashed_password
-    salt, hash_hex = hashed_password.split('$')
-    hash_obj = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
-    return hash_obj.hex() == hash_hex
-
-def reset_password(user_id, new_password):
-    hashed = hash_password(new_password)
-    try:
-        with engine.begin() as conn:
-            conn.execute(text("UPDATE users SET password_hash = :h WHERE user_id = :u"), {"h": hashed, "u": user_id})
-        clear_caches()
-        return True, "Passwort erfolgreich geändert!"
-    except Exception as e: 
-        return False, str(e)
-
 def clear_caches():
     st.cache_data.clear()
 
 @st.cache_data(ttl=60)
 def get_user_count():
     try:
-        with engine.connect() as conn: return conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
+        with engine.connect() as conn: return conn.execute(text("SELECT COUNT(*) FROM users WHERE rolle != 'Kind'")).scalar()
     except: return 0
 
 @st.cache_data(ttl=60)
@@ -270,42 +256,55 @@ def get_all_users():
     except: return pd.DataFrame()
 
 def create_initial_admin(name, email, password):
-    hashed = hash_password(password)
     try:
+        # Account in Supabase Auth anlegen
+        supabase.auth.sign_up({"email": email, "password": password})
+        
+        # Profil in der Tabelle anlegen
         with engine.begin() as conn:
-            conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, :h, 'Admin', 1, 'Kein Team')"),
-                {"n": name, "e": email, "h": hashed})
+            conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, 'supabase_managed', 'Admin', 1, 'Kein Team')"),
+                {"n": name, "e": email})
         clear_caches()
         return True
     except: return False
 
 def register_new_user(name, email, password, rolle, team_list):
-    hashed = hash_password(password)
     team_str = ", ".join(team_list) if team_list else "Kein Team"
     try:
+        # Registrierung direkt über Supabase Auth
+        supabase.auth.sign_up({"email": email, "password": password})
+        
+        # Profil eintragen (password_hash ist nur noch ein Dummy)
         with engine.begin() as conn:
-            conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, :h, :r, 1, :t)"),
-                {"n": name, "e": email, "h": hashed, "r": rolle, "t": team_str})
+            conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, 'supabase_managed', :r, 1, :t)"),
+                {"n": name, "e": email, "r": rolle, "t": team_str})
         clear_caches()
-        return True, "Erfolgreich registriert!"
+        return True, "Erfolgreich registriert! Bitte logge dich nun ein."
     except Exception as e:
-        if "unique" in str(e).lower(): return False, "E-Mail bereits registriert!"
-        return False, str(e)
+        if "already registered" in str(e).lower() or "unique" in str(e).lower(): return False, "E-Mail bereits registriert!"
+        return False, f"Fehler bei Registrierung: {e}"
 
 def authenticate(email, password):
-    with engine.connect() as conn:
-        result = conn.execute(text("SELECT * FROM users WHERE email = :email AND rolle != 'Kind'"), {"email": email}).fetchone()
-        if result and verify_password(password, result.password_hash): return dict(result._mapping)
-    return None
+    try:
+        # Authentifizierung läuft jetzt direkt gegen den Supabase-Server
+        auth_response = supabase.auth.sign_in_with_password({"email": email, "password": password})
+        
+        # Nach erfolgreichem Login holen wir das Profil
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT * FROM users WHERE email = :email AND rolle != 'Kind'"), {"email": email}).fetchone()
+            if result: return dict(result._mapping)
+        return None
+    except Exception:
+        return None
 
 def add_child(parent_id, child_name, child_team_list):
+    # Kinder loggen sich nicht selbst ein, brauchen daher keinen echten Auth-Account
     dummy_email = f"kind_{uuid.uuid4().hex[:8]}@tub.lokal"
-    dummy_pass = hash_password(secrets.token_hex(16)) 
     team_str = ", ".join(child_team_list) if child_team_list else "Kein Team"
     try:
         with engine.begin() as conn:
-            res = conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, parent_id, team) VALUES (:n, :e, :h, 'Kind', 1, :p, :t) RETURNING user_id"),
-                {"n": child_name, "e": dummy_email, "h": dummy_pass, "p": parent_id, "t": team_str})
+            res = conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, parent_id, team) VALUES (:n, :e, 'child_no_login', 'Kind', 1, :p, :t) RETURNING user_id"),
+                {"n": child_name, "e": dummy_email, "p": parent_id, "t": team_str})
             conn.execute(text("INSERT INTO parent_child (parent_id, child_id) VALUES (:p, :c) ON CONFLICT DO NOTHING"), {"p": parent_id, "c": res.scalar()})
         clear_caches()
         return True, f"{child_name} erfolgreich hinzugefügt!"
@@ -484,7 +483,6 @@ if get_user_count() == 0:
 
 elif st.session_state['logged_in_user'] is None:
     t_login, t_reg = st.tabs(["🔑 Einloggen", "📝 Neu Registrieren"])
-    
     with t_login:
         with st.form("login"):
             user = authenticate(st.text_input("E-Mail"), st.text_input("Passwort", type="password"))
@@ -492,42 +490,36 @@ elif st.session_state['logged_in_user'] is None:
                 if user:
                     st.session_state['logged_in_user'] = user
                     st.rerun()
-                else: 
-                    st.error("Zugangsdaten ungültig.")
-                    
-        # NEU: Passwort-vergessen-Button
+                else: st.error("Zugangsdaten ungültig.")
+        
+        # NEUER SUPABASE PASSWORT-RESET-DIALOG
+        @st.dialog("🔑 Passwort zurücksetzen")
+        def forgot_password_dialog():
+            st.write("Gib deine E-Mail-Adresse ein. Supabase sendet dir automatisch einen Link, um dein Passwort sicher zurückzusetzen.")
+            reset_email = st.text_input("E-Mail-Adresse")
+            if st.button("Passwort anfordern"):
+                if reset_email:
+                    try:
+                        # Supabase verschickt die Reset-Mail automatisch
+                        supabase.auth.reset_password_email(reset_email)
+                        st.success("Falls die E-Mail bei uns registriert ist, wurde ein Reset-Link verschickt!")
+                    except Exception as e:
+                        st.error(f"Fehler beim Senden der Mail: {e}")
+                else:
+                    st.warning("Bitte gib eine E-Mail-Adresse ein.")
+        
         if st.button("Passwort vergessen?", use_container_width=True):
-            st.info("💡 **Passwort vergessen?** Bitte sprich einen Trainer oder Administrator an. Diese können dir in Sekunden ein neues Passwort vergeben.")
-                    
+            forgot_password_dialog()
+            
     with t_reg:
         with st.form("reg"):
             n, e, p = st.text_input("Name"), st.text_input("E-Mail"), st.text_input("Passwort", type="password")
             r, t = st.selectbox("Rolle", ["Spieler", "Trainer", "Elternteil", "Organisator"]), st.multiselect("Team", TEAM_LISTE)
-            
-            st.markdown("---")
-            with st.expander("🛡️ Datenschutzhinweise anzeigen"):
-                st.markdown("""
-                **Zweck der Datenspeicherung:**
-                Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben.
-                
-                **Sicherheit:**
-                Die Daten werden sicher und verschlüsselt auf europäischen Servern gespeichert. Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten.
-                """)
-            
-            dsgvo = st.checkbox("Ich habe die Datenschutzhinweise gelesen und stimme der Verarbeitung meiner Daten zu.")
-            st.markdown("---")
-            
-            if st.form_submit_button("Registrieren"):
-                if not dsgvo:
-                    st.warning("⚠️ Bitte stimme den Datenschutzrichtlinien zu, um dich zu registrieren.")
-                elif not (n and e and p):
-                    st.warning("⚠️ Bitte fülle alle Pflichtfelder (Name, E-Mail, Passwort) aus.")
-                else:
-                    succ, msg = register_new_user(n, e, p, r, t)
-                    if succ: 
-                        st.success(msg)
-                    else: 
-                        st.error(msg)
+            dsgvo = st.checkbox("DSGVO zustimmen")
+            if st.form_submit_button("Registrieren") and dsgvo and n and e and p:
+                succ, msg = register_new_user(n, e, p, r, t)
+                if succ: st.success(msg)
+                else: st.error(msg)
 
 else:
     user = st.session_state['logged_in_user']
@@ -536,10 +528,14 @@ else:
         st.write(f"Willkommen zurück, **{user['name']}** - {user['rolle']}!")
     with col_logout:
         if st.button("🚪 Ausloggen", use_container_width=True):
+            try:
+                supabase.auth.sign_out()
+            except:
+                pass
             st.session_state['logged_in_user'] = None
             st.rerun()
 
-    # BÜNDEL-LADEN: Alle Daten werden gecacht geladen. Keine N+1 Queries!
+    # BÜNDEL-LADEN: Alle Daten werden gecacht geladen.
     children_df = get_children(user['user_id'])
     tasks_df = get_all_tasks()
     assign_df = get_task_assignments()
@@ -555,11 +551,10 @@ else:
             if c.get('team') and c['team'] != "Kein Team": my_teams.update([t.strip() for t in c['team'].split(',')])
     
     def is_relevant(teams_str):
-        # Admins und Organisatoren sehen immer ALLE Teams in der Übersicht
         if user['rolle'] in ['Admin', 'Organisator']: 
             return True
         if pd.isna(teams_str) or not str(teams_str).strip(): 
-            return True # Allgemeine Vereins-Termine
+            return True 
         return any(t.strip() in my_teams for t in str(teams_str).split(','))
 
     # DYNAMISCHE TABS AUFBAUEN
@@ -575,7 +570,6 @@ else:
         
     tabs = st.tabs(tab_titles)
     
-    # Tabs sicher zuweisen basierend auf der dynamischen Liste
     tab_idx = 0
     tab_overview = tabs[tab_idx]; tab_idx += 1
     tab_events = tabs[tab_idx]; tab_idx += 1
@@ -625,8 +619,6 @@ else:
                         
                         if cur_h < max_h:
                             found_open = True
-                            
-                            # Kontext ermitteln (Event oder Frei)
                             context = ""
                             date_str = ""
                             if pd.notna(tsk.get('event_id')):
@@ -671,7 +663,6 @@ else:
                     tsk_row = tasks_df[tasks_df['task_id'] == t_id]
                     if not tsk_row.empty:
                         tsk = tsk_row.iloc[0]
-                        # Finde heraus, wer aus der Familie den Job hat
                         fam_assigns = assign_df[(assign_df['task_id'] == t_id) & (assign_df['user_id'].isin(my_family_uids))]
                         who_list = fam_assigns['assignee_name'].tolist()
                         
@@ -702,7 +693,6 @@ else:
         
         rel_events = events_df[events_df['betroffene_teams'].apply(is_relevant)] if not events_df.empty else pd.DataFrame()
         
-        # Admin Optionen
         admin_options = {}
         if user['rolle'] in ['Admin', 'Organisator'] and not all_users_df.empty:
             admin_options = {row['user_id']: f"Admin-Zuweisung: {row['name']}" for _, row in all_users_df.iterrows()}
@@ -713,7 +703,6 @@ else:
                 with st.expander(f"🏐 {ev['titel']} ({ev['start_zeit']})", expanded=False):
                     st.write(f"📍 **Ort:** {ev['ort']} | 👕 **Teams:** {ev['betroffene_teams']}")
                     
-                    # --- TEILNAHME (ATTENDANCE) ---
                     st.markdown("#### 🏃‍♂️ Spieler-Teilnahme")
                     attendance_df = all_attendance_df[all_attendance_df['event_id'] == ev_id] if not all_attendance_df.empty else pd.DataFrame()
                     
@@ -750,7 +739,6 @@ else:
                             
                     st.divider()
                     
-                    # --- AUFGABEN ---
                     ev_tasks = tasks_df[tasks_df['event_id'] == ev_id] if not tasks_df.empty else pd.DataFrame()
                     st.markdown("#### Organisation & Aufgaben:")
                     
@@ -952,7 +940,7 @@ else:
                             "title": f"🏆 {ev['titel']} ({ev['betroffene_teams']})",
                             "start": start_iso,
                             "end": end_iso if end_iso else start_iso,
-                            "backgroundColor": "#1c83e1",  # Blau für Spieltage
+                            "backgroundColor": "#1c83e1",  
                             "borderColor": "#1c83e1"
                         })
                         
@@ -964,7 +952,7 @@ else:
                             "title": f"📋 {tk['kategorie']} ({tk.get('betroffene_teams', 'Alle')})",
                             "start": start_iso,
                             "end": start_iso,
-                            "backgroundColor": "#f9ab00",  # Orange für Aufgaben
+                            "backgroundColor": "#f9ab00",  
                             "borderColor": "#f9ab00",
                             "textColor": "#000000"
                         })
@@ -979,7 +967,7 @@ else:
                     "initialView": "dayGridMonth",
                     "navLinks": True,
                     "locale": "de",
-                    "firstDay": 1, # Woche startet am Montag
+                    "firstDay": 1, 
                     "buttonText": {
                         "today": "Heute",
                         "month": "Monat",
@@ -988,7 +976,6 @@ else:
                     }
                 }
                 
-                # CSS um den Kalender optisch an deine App anzupassen
                 custom_css = """
                     .fc-event-title { font-weight: 600; font-size: 0.85em; white-space: normal; }
                     .fc-toolbar-title { font-size: 1.2rem !important; }
@@ -1038,25 +1025,6 @@ else:
             st.divider()
             st.subheader("👥 User-Verwaltung")
             st.dataframe(all_users_df, use_container_width=True)
-            
-            st.divider()
-            st.subheader("🔑 Passwort zurücksetzen")
-            st.write("Vergib hier ein neues Passwort für Nutzer, die ihres vergessen haben.")
-            with st.form("reset_pw_form"):
-                opts = {r['user_id']: f"{r['name']} ({r['email']})" for _, r in all_users_df.iterrows()}
-                reset_id = st.selectbox("Benutzer auswählen:", list(opts.keys()), format_func=lambda x: opts[x])
-                new_pw = st.text_input("Neues Passwort", type="password")
-                
-                if st.form_submit_button("Passwort überschreiben"):
-                    if new_pw.strip() == "":
-                        st.warning("Bitte ein gültiges Passwort eingeben.")
-                    else:
-                        succ, msg = reset_password(reset_id, new_pw)
-                        if succ: 
-                            st.success(f"{msg} Der Nutzer kann sich nun mit dem neuen Passwort einloggen.")
-                        else: 
-                            st.error(msg)
-
             with st.form("del_u"):
                 opts = {r['user_id']: f"{r['name']} ({r['rolle']})" for _, r in all_users_df.iterrows()}
                 d_id = st.selectbox("Löschen:", list(opts.keys()), format_func=lambda x: opts[x])
