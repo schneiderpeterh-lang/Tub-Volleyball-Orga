@@ -28,10 +28,8 @@ st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide", initi
 with st.sidebar:
     st.title("🏐 TuB Bocholt")
     st.markdown("### Helfer-Organisation")
-    
     st.markdown("Hier organisieren wir unsere Spieltage, Turniere und Aufgaben im Verein.")
     st.divider()
-    
     st.markdown("#### Rechtliches")
     
     with st.expander("⚖️ Impressum", expanded=False):
@@ -40,39 +38,23 @@ with st.sidebar:
         Abteilung Volleyball
         Lowicker Str. 19c
         46395 Bocholt
-        
-        **Vertreten durch:**
-        Abteilungsleitung Volleyball
-        
-        **Kontakt:**
-        E-Mail: info@tub-bocholt-volleyball.de
-        Web: www.tub-bocholt-volleyball.de
         """)
         
     with st.expander("🛡️ Datenschutz", expanded=False):
         st.markdown("""
         **Zweck der Datenspeicherung:**
         Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben.
-        
         **Sicherheit & Hosting:**
-        Die Daten werden sicher und verschlüsselt in einer Supabase-Datenbank auf europäischen Servern (Irland/Frankfurt) gespeichert.
-        
-        **Deine Rechte:**
-        Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten. Schreibe uns dazu einfach eine kurze E-Mail oder bitte einen Admin um die Löschung deines Accounts.
+        Die Daten werden sicher und verschlüsselt in einer Supabase-Datenbank auf europäischen Servern gespeichert.
         """)
-        
     st.divider()
-    st.caption("App-Version 2.0 (Supabase Auth) | Status: Online 🟢")
+    st.caption("App-Version 2.1 (Supabase & Fahrer-Logik) | Status: Online 🟢")
 
-# MODERNE UI / CSS INJECTION
 def inject_custom_css():
     st.markdown("""
     <style>
-    /* 1. Standard-Streamlit-Branding (Menü, Footer) verstecken */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    
-    /* 2. Moderne Buttons mit Schatten und Hover-Effekt */
     .stButton > button {
         border-radius: 8px !important;
         transition: all 0.3s ease !important;
@@ -83,8 +65,6 @@ def inject_custom_css():
         transform: translateY(-2px);
         box-shadow: 0 4px 10px rgba(0,0,0,0.15) !important;
     }
-    
-    /* 3. Reiter (Tabs) optisch aufwerten */
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
         padding-bottom: 5px;
@@ -98,8 +78,6 @@ def inject_custom_css():
         background-color: rgba(28, 131, 225, 0.1); 
         border-bottom: 3px solid #1c83e1;
     }
-    
-    /* 4. Sanfte Umrandung für die Container (Kacheln) */
     div[data-testid="stContainer"] {
         border-radius: 12px;
         transition: all 0.3s ease;
@@ -110,10 +88,9 @@ def inject_custom_css():
     </style>
     """, unsafe_allow_html=True)
 
-# CSS direkt laden
 inject_custom_css()
 
-# SUPABASE AUTH CLIENT INITIALISIEREN
+# SUPABASE AUTH CLIENT
 @st.cache_resource
 def init_supabase() -> Client:
     url = st.secrets["supabase"]["url"]
@@ -126,7 +103,7 @@ except Exception as e:
     st.error(f"Fehler bei Supabase-Initialisierung: {e}")
     st.stop()
 
-# CACHING DER DATENBANKVERBINDUNG (SQLAlchemy für Tabellen & Nutzerprofile)
+# CACHING DER DATENBANKVERBINDUNG
 @st.cache_resource
 def get_database_engine():
     try:
@@ -228,6 +205,12 @@ def update_db_schema(_engine):
                 PRIMARY KEY (event_id, user_id)
             );
         """))
+        
+        # NEU: Spalte für Sitzplätze/Kommentare bei Aufgaben hinzufügen
+        try:
+            conn.execute(text("ALTER TABLE task_assignments ADD COLUMN IF NOT EXISTS kommentar TEXT;"))
+        except Exception: pass
+        
     return True
 
 try:
@@ -237,7 +220,7 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 3. KRYPTOGRAFIE & USER-VERWALTUNG (Neu mit Supabase Auth)
+# 3. KRYPTOGRAFIE & USER-VERWALTUNG
 # ==========================================
 def clear_caches():
     st.cache_data.clear()
@@ -257,10 +240,7 @@ def get_all_users():
 
 def create_initial_admin(name, email, password):
     try:
-        # Account in Supabase Auth anlegen
         supabase.auth.sign_up({"email": email, "password": password})
-        
-        # Profil in der Tabelle anlegen
         with engine.begin() as conn:
             conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, 'supabase_managed', 'Admin', 1, 'Kein Team')"),
                 {"n": name, "e": email})
@@ -271,10 +251,7 @@ def create_initial_admin(name, email, password):
 def register_new_user(name, email, password, rolle, team_list):
     team_str = ", ".join(team_list) if team_list else "Kein Team"
     try:
-        # Registrierung direkt über Supabase Auth
         supabase.auth.sign_up({"email": email, "password": password})
-        
-        # Profil eintragen (password_hash ist nur noch ein Dummy)
         with engine.begin() as conn:
             conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, 'supabase_managed', :r, 1, :t)"),
                 {"n": name, "e": email, "r": rolle, "t": team_str})
@@ -286,10 +263,7 @@ def register_new_user(name, email, password, rolle, team_list):
 
 def authenticate(email, password):
     try:
-        # Authentifizierung läuft jetzt direkt gegen den Supabase-Server
         auth_response = supabase.auth.sign_in_with_password({"email": email, "password": password})
-        
-        # Nach erfolgreichem Login holen wir das Profil
         with engine.connect() as conn:
             result = conn.execute(text("SELECT * FROM users WHERE email = :email AND rolle != 'Kind'"), {"email": email}).fetchone()
             if result: return dict(result._mapping)
@@ -298,7 +272,6 @@ def authenticate(email, password):
         return None
 
 def add_child(parent_id, child_name, child_team_list):
-    # Kinder loggen sich nicht selbst ein, brauchen daher keinen echten Auth-Account
     dummy_email = f"kind_{uuid.uuid4().hex[:8]}@tub.lokal"
     team_str = ", ".join(child_team_list) if child_team_list else "Kein Team"
     try:
@@ -398,7 +371,7 @@ def get_all_tasks():
 def get_task_assignments():
     try:
         with engine.connect() as conn:
-            return pd.read_sql(text("SELECT ta.task_id, ta.user_id, u.name as assignee_name FROM task_assignments ta JOIN users u ON ta.user_id = u.user_id"), conn)
+            return pd.read_sql(text("SELECT ta.task_id, ta.user_id, ta.kommentar, u.name as assignee_name FROM task_assignments ta JOIN users u ON ta.user_id = u.user_id"), conn)
     except: return pd.DataFrame()
 
 @st.cache_data(ttl=60)
@@ -432,6 +405,15 @@ def delete_task(task_id):
         return True, "Aufgabe gelöscht!"
     except Exception as e: return False, str(e)
 
+def cancel_task(task_id, user_id):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM task_assignments WHERE task_id = :t AND user_id = :u"), {"t": task_id, "u": user_id})
+        clear_caches()
+        return True, "Aufgabe erfolgreich freigegeben!"
+    except Exception as e:
+        return False, str(e)
+
 def delete_event(event_id):
     try:
         with engine.begin() as conn:
@@ -455,15 +437,19 @@ def set_event_attendance(event_id, user_id, status):
         return True
     except Exception as e: return False
 
-def accept_task(task_id, user_id):
+def accept_task(task_id, user_id, kommentar=None):
     try:
         with engine.begin() as conn:
             existing = conn.execute(text("SELECT 1 FROM task_assignments WHERE task_id = :t AND user_id = :u"), {"t": task_id, "u": user_id}).scalar()
             if existing: return False, "Bereits eingetragen!"
-            conn.execute(text("INSERT INTO task_assignments (task_id, user_id) VALUES (:t, :u)"), {"t": task_id, "u": user_id})
+            conn.execute(text("INSERT INTO task_assignments (task_id, user_id, kommentar) VALUES (:t, :u, :k)"), {"t": task_id, "u": user_id, "k": kommentar})
         clear_caches()
         return True, "Übernommen!"
     except Exception as e: return False, str(e)
+
+# Hilfsfunktion für die Anzeige des Namens inkl. Kommentar (z.B. Sitzplätze)
+def format_assignee_name(row):
+    return f"{row['assignee_name']} {row['kommentar'] if pd.notna(row.get('kommentar')) else ''}"
 
 # ==========================================
 # 5. UI COMPONENTS
@@ -492,7 +478,6 @@ elif st.session_state['logged_in_user'] is None:
                     st.rerun()
                 else: st.error("Zugangsdaten ungültig.")
         
-        # NEUER SUPABASE PASSWORT-RESET-DIALOG
         @st.dialog("🔑 Passwort zurücksetzen")
         def forgot_password_dialog():
             st.write("Gib deine E-Mail-Adresse ein. Supabase sendet dir automatisch einen Link, um dein Passwort sicher zurückzusetzen.")
@@ -500,7 +485,6 @@ elif st.session_state['logged_in_user'] is None:
             if st.button("Passwort anfordern"):
                 if reset_email:
                     try:
-                        # Supabase verschickt die Reset-Mail automatisch
                         supabase.auth.reset_password_email(reset_email)
                         st.success("Falls die E-Mail bei uns registriert ist, wurde ein Reset-Link verschickt!")
                     except Exception as e:
@@ -528,14 +512,11 @@ else:
         st.write(f"Willkommen zurück, **{user['name']}** - {user['rolle']}!")
     with col_logout:
         if st.button("🚪 Ausloggen", use_container_width=True):
-            try:
-                supabase.auth.sign_out()
-            except:
-                pass
+            try: supabase.auth.sign_out()
+            except: pass
             st.session_state['logged_in_user'] = None
             st.rerun()
 
-    # BÜNDEL-LADEN: Alle Daten werden gecacht geladen.
     children_df = get_children(user['user_id'])
     tasks_df = get_all_tasks()
     assign_df = get_task_assignments()
@@ -543,7 +524,6 @@ else:
     all_attendance_df = get_all_attendance()
     all_users_df = get_all_users()
 
-    # TEAM LOGIK FÜR FILTER
     my_teams = set()
     if user.get('team') and user['team'] != "Kein Team": my_teams.update([t.strip() for t in user['team'].split(',')])
     if not children_df.empty:
@@ -551,22 +531,14 @@ else:
             if c.get('team') and c['team'] != "Kein Team": my_teams.update([t.strip() for t in c['team'].split(',')])
     
     def is_relevant(teams_str):
-        if user['rolle'] in ['Admin', 'Organisator']: 
-            return True
-        if pd.isna(teams_str) or not str(teams_str).strip(): 
-            return True 
+        if user['rolle'] in ['Admin', 'Organisator']: return True
+        if pd.isna(teams_str) or not str(teams_str).strip(): return True
         return any(t.strip() in my_teams for t in str(teams_str).split(','))
 
-    # DYNAMISCHE TABS AUFBAUEN
     tab_titles = ["🏠 Übersicht", "🏆 Spieltage & Events", "📋 Freie Aufgaben"]
-    
-    if user['rolle'] != 'Elternteil':
-        tab_titles.append("📅 Kalender-Ansicht")
-        
+    if user['rolle'] != 'Elternteil': tab_titles.append("📅 Kalender-Ansicht")
     tab_titles.append("👨‍👩‍👧 Familie")
-    
-    if user['rolle'] == 'Admin':
-        tab_titles.append("👥 Admin")
+    if user['rolle'] == 'Admin': tab_titles.append("👥 Admin")
         
     tabs = st.tabs(tab_titles)
     
@@ -574,21 +546,15 @@ else:
     tab_overview = tabs[tab_idx]; tab_idx += 1
     tab_events = tabs[tab_idx]; tab_idx += 1
     tab_tasks = tabs[tab_idx]; tab_idx += 1
-    
     if user['rolle'] != 'Elternteil':
         tab_calendar = tabs[tab_idx]; tab_idx += 1
-    else:
-        tab_calendar = None
-        
+    else: tab_calendar = None
     tab_family = tabs[tab_idx]; tab_idx += 1
-    
     if user['rolle'] == 'Admin':
         tab_admin = tabs[tab_idx]; tab_idx += 1
-    else:
-        tab_admin = None
+    else: tab_admin = None
 
-    if 'selected_event_team' not in st.session_state:
-        st.session_state['selected_event_team'] = None
+    if 'selected_event_team' not in st.session_state: st.session_state['selected_event_team'] = None
 
     # ----------------------------------------------------
     # TAB 0: ÜBERSICHT (DASHBOARD)
@@ -603,14 +569,72 @@ else:
             
         my_assigned_tids = assign_df[assign_df['user_id'].isin(my_family_uids)]['task_id'].tolist() if not assign_df.empty else []
         
+        # --- HIGHLIGHT FÜR AUSWÄRTSSPIELE (FAHRER GESUCHT) ---
+        st.markdown("### 🚗 Fahrer für Auswärtsspiele gesucht!")
+        found_driver_task = False
+        
+        if not tasks_df.empty and not events_df.empty:
+            driver_tasks = tasks_df[tasks_df['kategorie'].str.contains('Fahr|Auto', case=False, na=False)]
+            
+            for _, tsk in driver_tasks.iterrows():
+                if not is_relevant(tsk.get('betroffene_teams')): continue
+                
+                t_id = tsk['task_id']
+                t_assigns = assign_df[assign_df['task_id'] == t_id] if not assign_df.empty else pd.DataFrame()
+                cur_h = len(t_assigns)
+                max_h = int(tsk.get('max_helfer', 1))
+                
+                if cur_h < max_h and pd.notna(tsk.get('event_id')):
+                    ev_row = events_df[events_df['event_id'] == tsk['event_id']]
+                    if not ev_row.empty:
+                        ev = ev_row.iloc[0]
+                        ort = str(ev.get('ort', '')).lower()
+                        
+                        if 'bocholt' not in ort and ort.strip() != '':
+                            found_driver_task = True
+                            with st.container(border=True):
+                                c_info, c_action = st.columns([3, 2])
+                                with c_info:
+                                    st.error(f"**{ev['titel']}**")
+                                    st.write(f"📍 **Ziel:** {ev['ort']} | 🗓️ {ev['start_zeit']}")
+                                    st.caption(f"Gesucht: {tsk['kategorie']} ({cur_h}/{max_h} belegt)")
+                                with c_action:
+                                    options = {user['user_id']: "Ich fahre selbst"}
+                                    if not children_df.empty:
+                                        for _, child in children_df.iterrows(): options[child['user_id']] = f"Fahre für Kind: {child['name']}"
+                                    if not t_assigns.empty:
+                                        options = {k: v for k, v in options.items() if k not in t_assigns['user_id'].tolist()}
+                                    
+                                    if options:
+                                        with st.form(key=f"drive_form_{t_id}"):
+                                            sel_u = st.selectbox("Wer fährt?", list(options.keys()), format_func=lambda x: options[x], label_visibility="collapsed")
+                                            seats = st.number_input("Freie Plätze (ohne Fahrer)", min_value=1, max_value=8, value=3)
+                                            if st.form_submit_button("🚀 Übernehmen", use_container_width=True):
+                                                kommentar_text = f"({seats} freie Plätze)"
+                                                success, msg = accept_task(t_id, sel_u, kommentar_text)
+                                                if success: st.rerun()
+                                    else:
+                                        st.success("✅ Aus deiner Familie ist bereits jemand eingetragen.")
+
+        if not found_driver_task:
+            st.info("Aktuell sind alle Auswärtsfahrten deiner Teams abgedeckt oder es stehen keine an.")
+            
+        st.divider()
+        
         col1, col2 = st.columns(2)
         
-        # Spalte 1: Offene Aufgaben
         with col1:
             st.markdown("#### 🚨 Hilfe dringend gesucht")
             found_open = False
             if not tasks_df.empty:
                 for _, tsk in tasks_df.iterrows():
+                    # Filtere die Fahrer-Aufgaben hier heraus, da sie schon oben stehen
+                    if 'fahr' in str(tsk['kategorie']).lower() or 'auto' in str(tsk['kategorie']).lower():
+                        if pd.notna(tsk.get('event_id')):
+                            ev_r = events_df[events_df['event_id'] == tsk['event_id']]
+                            if not ev_r.empty and 'bocholt' not in str(ev_r.iloc[0].get('ort', '')).lower():
+                                continue
+
                     if is_relevant(tsk.get('betroffene_teams')):
                         t_id = tsk['task_id']
                         t_assigns = assign_df[assign_df['task_id'] == t_id] if not assign_df.empty else pd.DataFrame()
@@ -650,21 +674,33 @@ else:
                                             success, msg = accept_task(t_id, sel_u)
                                             if success: st.success(msg); st.rerun()
                                 else:
-                                    st.success("✅ Du & Familie seid bereits eingetragen.")
+                                    st.success("✅ Familie bereits eingetragen.")
                                     
             if not found_open:
                 st.success("Aktuell sind alle Aufgaben für deine Teams belegt. Super!")
 
-        # Spalte 2: Eigene Aufgaben
         with col2:
             st.markdown("#### ✅ Deine übernommenen Aufgaben")
+            
+            @st.dialog("⚠️ Aufgabe wirklich abgeben?")
+            def confirm_cancel(t_id, u_id, t_name, u_name):
+                st.warning(f"Möchtest du die Aufgabe **{t_name}** für **{u_name}** wirklich wieder freigeben?")
+                st.write("Sie rutscht dadurch zurück in die Liste der offenen Aufgaben.")
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("❌ Ja, abgeben", use_container_width=True):
+                        succ, msg = cancel_task(t_id, u_id)
+                        if succ: st.rerun()
+                with c2:
+                    if st.button("Behalten", type="primary", use_container_width=True):
+                        st.rerun()
+
             if my_assigned_tids:
                 for t_id in my_assigned_tids:
                     tsk_row = tasks_df[tasks_df['task_id'] == t_id]
                     if not tsk_row.empty:
                         tsk = tsk_row.iloc[0]
                         fam_assigns = assign_df[(assign_df['task_id'] == t_id) & (assign_df['user_id'].isin(my_family_uids))]
-                        who_list = fam_assigns['assignee_name'].tolist()
                         
                         context = ""
                         date_str = ""
@@ -680,19 +716,23 @@ else:
                         with st.container(border=True):
                             st.write(f"**{tsk['kategorie']}**")
                             st.caption(f"{context} | 🗓️ {date_str}")
-                            st.write(f"👷‍♂️ **Eingetragen:** {', '.join(who_list)}")
+                            
+                            for _, assign_row in fam_assigns.iterrows():
+                                c1, c2 = st.columns([3, 1])
+                                with c1:
+                                    st.write(f"👷‍♂️ {format_assignee_name(assign_row)}")
+                                with c2:
+                                    if st.button("Abgeben", key=f"cancel_{t_id}_{assign_row['user_id']}", use_container_width=True):
+                                        confirm_cancel(t_id, assign_row['user_id'], tsk['kategorie'], assign_row['assignee_name'])
             else:
                 st.info("Du bist aktuell für keine anstehenden Aufgaben eingetragen.")
-
 
     # ----------------------------------------------------
     # TAB 1: SPIELTAGE & EVENTS
     # ----------------------------------------------------
     with tab_events:
         st.write("Wähle eine Altersklasse/ein Team, um die Termine zu sehen.")
-        
         rel_events = events_df[events_df['betroffene_teams'].apply(is_relevant)] if not events_df.empty else pd.DataFrame()
-        
         admin_options = {}
         if user['rolle'] in ['Admin', 'Organisator'] and not all_users_df.empty:
             admin_options = {row['user_id']: f"Admin-Zuweisung: {row['name']}" for _, row in all_users_df.iterrows()}
@@ -710,17 +750,13 @@ else:
                         dabei = attendance_df[attendance_df['status'] == 'dabei']['name'].tolist()
                         abgesagt = attendance_df[attendance_df['status'] == 'abgesagt']['name'].tolist()
                         
-                        if dabei:
-                            st.success(f"✅ **Dabei ({len(dabei)}):**\n" + "\n".join([f"- {name}" for name in dabei]))
-                        if abgesagt:
-                            st.error(f"❌ **Abgesagt ({len(abgesagt)}):**\n" + "\n".join([f"- {name}" for name in abgesagt]))
-                    else:
-                        st.info("Noch keine Rückmeldungen für diesen Spieltag.")
+                        if dabei: st.success(f"✅ **Dabei ({len(dabei)}):**\n" + "\n".join([f"- {name}" for name in dabei]))
+                        if abgesagt: st.error(f"❌ **Abgesagt ({len(abgesagt)}):**\n" + "\n".join([f"- {name}" for name in abgesagt]))
+                    else: st.info("Noch keine Rückmeldungen für diesen Spieltag.")
                     
                     att_options = {user['user_id']: "Ich selbst"}
                     if not children_df.empty:
                         for _, child in children_df.iterrows(): att_options[child['user_id']] = f"Kind: {child['name']}"
-                    
                     if user['rolle'] in ['Admin', 'Organisator']:
                         for uid, uname in admin_options.items():
                             if uid not in att_options: att_options[uid] = uname
@@ -753,7 +789,9 @@ else:
                             with tc1:
                                 st.write(f"**{tsk['kategorie']}**")
                                 st.caption(tsk['beschreibung'])
-                                st.write(f"👥 Belegt: {cur_h} / {max_h}. " + ", ".join(t_assigns['assignee_name'].tolist()))
+                                
+                                formatted_names = [format_assignee_name(row) for _, row in t_assigns.iterrows()]
+                                st.write(f"👥 Belegt: {cur_h} / {max_h}. " + ", ".join(formatted_names))
                             with tc2:
                                 options = {user['user_id']: "Ich selbst"}
                                 if not children_df.empty:
@@ -774,8 +812,7 @@ else:
                                     if st.button("🗑️ Löschen", key=f"del_ev_{t_id}"): 
                                         delete_task(t_id); st.rerun()
                             st.divider()
-                    else:
-                        st.info("Noch keine Aufgaben für dieses Event hinterlegt.")
+                    else: st.info("Noch keine Aufgaben für dieses Event hinterlegt.")
                         
                     if user['rolle'] in ['Admin', 'Organisator']:
                         st.markdown("➕ **Neuen Orga-Punkt erstellen**")
@@ -884,7 +921,9 @@ else:
                         if pd.notna(row.get('start_zeit')): st.write(f"🗓️ {row['start_zeit']}")
                         if pd.notna(row.get('betroffene_teams')) and row['betroffene_teams']: st.write(f"👕 Teams: {row['betroffene_teams']}")
                         st.caption(row['beschreibung'])
-                        st.write(f"👥 Belegt: {cur_h}/{max_h}. " + ", ".join(t_assigns['assignee_name'].tolist()))
+                        
+                        formatted_names = [format_assignee_name(r) for _, r in t_assigns.iterrows()]
+                        st.write(f"👥 Belegt: {cur_h}/{max_h}. " + ", ".join(formatted_names))
                     with col2:
                         options = {user['user_id']: "Ich selbst"}
                         if not children_df.empty:
@@ -910,7 +949,6 @@ else:
     if tab_calendar is not None:
         with tab_calendar:
             st.write("Chronologische Übersicht aller relevanten Termine in einem interaktiven Kalender.")
-            
             filter_optionen = ["Alle meine Teams"] + TEAM_LISTE
             selected_cal_team = st.selectbox("Kalender filtern nach Team:", filter_optionen)
             
@@ -930,7 +968,6 @@ else:
                 except: return None
 
             calendar_events = []
-            
             if not events_df.empty:
                 for _, ev in events_df[events_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
                     start_iso = parse_to_iso(ev['start_zeit'])
@@ -975,14 +1012,12 @@ else:
                         "list": "Liste"
                     }
                 }
-                
                 custom_css = """
                     .fc-event-title { font-weight: 600; font-size: 0.85em; white-space: normal; }
                     .fc-toolbar-title { font-size: 1.2rem !important; }
                     .fc-button { border-radius: 6px !important; }
                     .fc-theme-standard .fc-scrollgrid { border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
                 """
-                
                 calendar(events=calendar_events, options=calendar_options, custom_css=custom_css, key=f"cal_{selected_cal_team}")
             else: 
                 st.info("Keine Einträge im Kalender für diesen Filter.")
