@@ -1,10 +1,9 @@
 import streamlit as st
 import pandas as pd
 import datetime
-import hashlib
-import secrets
 import uuid
 from sqlalchemy import create_engine, text
+from supabase import create_client, Client
 
 try:
     import icalendar
@@ -29,10 +28,8 @@ st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide", initi
 with st.sidebar:
     st.title("🏐 TuB Bocholt")
     st.markdown("### Helfer-Organisation")
-    
     st.markdown("Hier organisieren wir unsere Spieltage, Turniere und Aufgaben im Verein.")
     st.divider()
-    
     st.markdown("#### Rechtliches")
     
     with st.expander("⚖️ Impressum", expanded=False):
@@ -41,36 +38,23 @@ with st.sidebar:
         Abteilung Volleyball
         Lowicker Str. 19c
         46395 Bocholt
-        
-        **Vertreten durch:**
-        Abteilungsleitung Volleyball
-        
-        **Kontakt:**
-        E-Mail: info@tub-bocholt-volleyball.de
-        Web: www.tub-bocholt-volleyball.de
         """)
         
     with st.expander("🛡️ Datenschutz", expanded=False):
         st.markdown("""
         **Zweck der Datenspeicherung:**
         Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben.
-        
         **Sicherheit & Hosting:**
-        Die Daten werden sicher und verschlüsselt in einer Supabase-Datenbank auf europäischen Servern (Irland/Frankfurt) gespeichert.
-        
-        **Deine Rechte:**
-        Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten. Schreibe uns dazu einfach eine kurze E-Mail oder bitte einen Admin um die Löschung deines Accounts.
+        Die Daten werden sicher und verschlüsselt in einer Supabase-Datenbank auf europäischen Servern gespeichert.
         """)
-        
     st.divider()
-    st.caption("App-Version 1.2 (Catering-Update) | Status: Online 🟢")
+    st.caption("App-Version 2.5 (Supabase, Kombi-Logik & Trainer) | Status: Online 🟢")
 
 def inject_custom_css():
     st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    
     .stButton > button {
         border-radius: 8px !important;
         transition: all 0.3s ease !important;
@@ -81,7 +65,6 @@ def inject_custom_css():
         transform: translateY(-2px);
         box-shadow: 0 4px 10px rgba(0,0,0,0.15) !important;
     }
-    
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
         padding-bottom: 5px;
@@ -95,19 +78,32 @@ def inject_custom_css():
         background-color: rgba(28, 131, 225, 0.1); 
         border-bottom: 3px solid #1c83e1;
     }
-    
     div[data-testid="stContainer"] {
         border-radius: 12px;
         transition: all 0.3s ease;
     }
     div[data-testid="stContainer"]:hover {
-        border-color: #1c83e1; 
+        border-color: #1c83e1;
     }
     </style>
     """, unsafe_allow_html=True)
 
 inject_custom_css()
 
+# SUPABASE AUTH CLIENT
+@st.cache_resource
+def init_supabase() -> Client:
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
+    return create_client(url, key)
+
+try:
+    supabase = init_supabase()
+except Exception as e:
+    st.error(f"Fehler bei Supabase-Initialisierung: {e}")
+    st.stop()
+
+# CACHING DER DATENBANKVERBINDUNG
 @st.cache_resource
 def get_database_engine():
     try:
@@ -210,7 +206,6 @@ def update_db_schema(_engine):
             );
         """))
         
-        # NEU: Spalte für Catering-Beiträge und andere Kommentare
         try:
             conn.execute(text("ALTER TABLE task_assignments ADD COLUMN IF NOT EXISTS kommentar TEXT;"))
         except Exception: pass
@@ -224,36 +219,15 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 3. KRYPTOGRAFIE & USER-VERWALTUNG
+# 3. USER-VERWALTUNG
 # ==========================================
-def hash_password(password: str) -> str:
-    salt = secrets.token_hex(16)
-    hash_obj = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
-    return f"{salt}${hash_obj.hex()}"
-
-def verify_password(password: str, hashed_password: str) -> bool:
-    if "$" not in hashed_password: return password == hashed_password
-    salt, hash_hex = hashed_password.split('$')
-    hash_obj = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
-    return hash_obj.hex() == hash_hex
-
-def reset_password(user_id, new_password):
-    hashed = hash_password(new_password)
-    try:
-        with engine.begin() as conn:
-            conn.execute(text("UPDATE users SET password_hash = :h WHERE user_id = :u"), {"h": hashed, "u": user_id})
-        clear_caches()
-        return True, "Passwort erfolgreich geändert!"
-    except Exception as e: 
-        return False, str(e)
-
 def clear_caches():
     st.cache_data.clear()
 
 @st.cache_data(ttl=60)
 def get_user_count():
     try:
-        with engine.connect() as conn: return conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
+        with engine.connect() as conn: return conn.execute(text("SELECT COUNT(*) FROM users WHERE rolle != 'Kind'")).scalar()
     except: return 0
 
 @st.cache_data(ttl=60)
@@ -264,42 +238,45 @@ def get_all_users():
     except: return pd.DataFrame()
 
 def create_initial_admin(name, email, password):
-    hashed = hash_password(password)
     try:
+        supabase.auth.sign_up({"email": email, "password": password})
         with engine.begin() as conn:
-            conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, :h, 'Admin', 1, 'Kein Team')"),
-                {"n": name, "e": email, "h": hashed})
+            conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, 'supabase_managed', 'Admin', 1, 'Kein Team')"),
+                {"n": name, "e": email})
         clear_caches()
         return True
     except: return False
 
 def register_new_user(name, email, password, rolle, team_list):
-    hashed = hash_password(password)
     team_str = ", ".join(team_list) if team_list else "Kein Team"
     try:
+        supabase.auth.sign_up({"email": email, "password": password})
         with engine.begin() as conn:
-            conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, :h, :r, 1, :t)"),
-                {"n": name, "e": email, "h": hashed, "r": rolle, "t": team_str})
+            conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, 'supabase_managed', :r, 1, :t)"),
+                {"n": name, "e": email, "r": rolle, "t": team_str})
         clear_caches()
-        return True, "Erfolgreich registriert!"
+        return True, "Erfolgreich registriert! Bitte logge dich nun ein."
     except Exception as e:
-        if "unique" in str(e).lower(): return False, "E-Mail bereits registriert!"
-        return False, str(e)
+        if "already registered" in str(e).lower() or "unique" in str(e).lower(): return False, "E-Mail bereits registriert!"
+        return False, f"Fehler bei Registrierung: {e}"
 
 def authenticate(email, password):
-    with engine.connect() as conn:
-        result = conn.execute(text("SELECT * FROM users WHERE email = :email AND rolle != 'Kind'"), {"email": email}).fetchone()
-        if result and verify_password(password, result.password_hash): return dict(result._mapping)
-    return None
+    try:
+        auth_response = supabase.auth.sign_in_with_password({"email": email, "password": password})
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT * FROM users WHERE email = :email AND rolle != 'Kind'"), {"email": email}).fetchone()
+            if result: return dict(result._mapping)
+        return None
+    except Exception:
+        return None
 
 def add_child(parent_id, child_name, child_team_list):
     dummy_email = f"kind_{uuid.uuid4().hex[:8]}@tub.lokal"
-    dummy_pass = hash_password(secrets.token_hex(16)) 
     team_str = ", ".join(child_team_list) if child_team_list else "Kein Team"
     try:
         with engine.begin() as conn:
-            res = conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, parent_id, team) VALUES (:n, :e, :h, 'Kind', 1, :p, :t) RETURNING user_id"),
-                {"n": child_name, "e": dummy_email, "h": dummy_pass, "p": parent_id, "t": team_str})
+            res = conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, parent_id, team) VALUES (:n, :e, 'child_no_login', 'Kind', 1, :p, :t) RETURNING user_id"),
+                {"n": child_name, "e": dummy_email, "p": parent_id, "t": team_str})
             conn.execute(text("INSERT INTO parent_child (parent_id, child_id) VALUES (:p, :c) ON CONFLICT DO NOTHING"), {"p": parent_id, "c": res.scalar()})
         clear_caches()
         return True, f"{child_name} erfolgreich hinzugefügt!"
@@ -427,6 +404,15 @@ def delete_task(task_id):
         return True, "Aufgabe gelöscht!"
     except Exception as e: return False, str(e)
 
+def cancel_task(task_id, user_id):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM task_assignments WHERE task_id = :t AND user_id = :u"), {"t": task_id, "u": user_id})
+        clear_caches()
+        return True, "Aufgabe erfolgreich freigegeben!"
+    except Exception as e:
+        return False, str(e)
+
 def delete_event(event_id):
     try:
         with engine.begin() as conn:
@@ -436,6 +422,15 @@ def delete_event(event_id):
         clear_caches()
         return True, "Spieltag inkl. Aufgaben gelöscht!"
     except Exception as e: return False, str(e)
+
+def update_event_location(event_id, neuer_ort):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE events SET ort = :ort WHERE event_id = :id"), {"ort": neuer_ort, "id": event_id})
+        clear_caches()
+        return True
+    except Exception:
+        return False
 
 def set_event_attendance(event_id, user_id, status):
     try:
@@ -462,7 +457,7 @@ def accept_task(task_id, user_id, kommentar=None):
 
 def format_assignee_name(row):
     if pd.notna(row.get('kommentar')) and str(row.get('kommentar')).strip():
-        return f"{row['assignee_name']} ({row['kommentar']})"
+        return f"{row['assignee_name']} {row['kommentar']}"
     return row['assignee_name']
 
 # ==========================================
@@ -495,8 +490,22 @@ elif st.session_state['logged_in_user'] is None:
                 else: 
                     st.error("Zugangsdaten ungültig.")
                     
+        @st.dialog("🔑 Passwort zurücksetzen")
+        def forgot_password_dialog():
+            st.write("Gib deine E-Mail-Adresse ein. Supabase sendet dir automatisch einen Link, um dein Passwort sicher zurückzusetzen.")
+            reset_email = st.text_input("E-Mail-Adresse")
+            if st.button("Passwort anfordern"):
+                if reset_email:
+                    try:
+                        supabase.auth.reset_password_email(reset_email)
+                        st.success("Falls die E-Mail bei uns registriert ist, wurde ein Reset-Link verschickt!")
+                    except Exception as e:
+                        st.error(f"Fehler beim Senden der Mail: {e}")
+                else:
+                    st.warning("Bitte gib eine E-Mail-Adresse ein.")
+        
         if st.button("Passwort vergessen?", use_container_width=True):
-            st.info("💡 **Passwort vergessen?** Bitte sprich einen Trainer oder Administrator an. Diese können dir in Sekunden ein neues Passwort vergeben.")
+            forgot_password_dialog()
                     
     with t_reg:
         with st.form("reg"):
@@ -535,6 +544,8 @@ else:
         st.write(f"Willkommen zurück, **{user['name']}** - {user['rolle']}!")
     with col_logout:
         if st.button("🚪 Ausloggen", use_container_width=True):
+            try: supabase.auth.sign_out()
+            except: pass
             st.session_state['logged_in_user'] = None
             st.rerun()
 
@@ -601,7 +612,59 @@ else:
         if not children_df.empty:
             my_family_uids.extend(children_df['user_id'].tolist())
             
-        my_assigned_tids = assign_df[assign_df['user_id'].isin(my_family_uids)]['task_id'].tolist() if not assign_df.empty else []
+        my_assigned_tids = assign_df[assign_df['user_id'].isin(my_family_uids)]['task_id'].unique().tolist() if not assign_df.empty else []
+        
+        # --- HIGHLIGHT FÜR AUSWÄRTSSPIELE (FAHRER GESUCHT) ---
+        st.markdown("### 🚗 Fahrer für Auswärtsspiele gesucht!")
+        found_driver_task = False
+        
+        if not tasks_df.empty and not events_df.empty:
+            driver_tasks = tasks_df[tasks_df['kategorie'].str.contains('Fahr|Auto', case=False, na=False)]
+            
+            for _, tsk in driver_tasks.iterrows():
+                if not is_relevant(tsk.get('betroffene_teams')): continue
+                
+                t_id = tsk['task_id']
+                t_assigns = assign_df[assign_df['task_id'] == t_id] if not assign_df.empty else pd.DataFrame()
+                cur_h = len(t_assigns)
+                max_h = int(tsk.get('max_helfer', 1))
+                
+                if cur_h < max_h and pd.notna(tsk.get('event_id')):
+                    ev_row = events_df[events_df['event_id'] == tsk['event_id']]
+                    if not ev_row.empty:
+                        ev = ev_row.iloc[0]
+                        ort = str(ev.get('ort', '')).lower()
+                        
+                        if 'bocholt' not in ort and ort.strip() != '':
+                            found_driver_task = True
+                            with st.container(border=True):
+                                c_info, c_action = st.columns([3, 2])
+                                with c_info:
+                                    st.error(f"**{ev['titel']}**")
+                                    st.write(f"📍 **Ziel:** {ev['ort']} | 🗓️ {ev['start_zeit']}")
+                                    st.caption(f"Gesucht: {tsk['kategorie']} ({cur_h}/{max_h} belegt)")
+                                with c_action:
+                                    options = {user['user_id']: "Ich fahre selbst"}
+                                    if not children_df.empty:
+                                        for _, child in children_df.iterrows(): options[child['user_id']] = f"Fahre für Kind: {child['name']}"
+                                    if not t_assigns.empty:
+                                        options = {k: v for k, v in options.items() if k not in t_assigns['user_id'].tolist()}
+                                    
+                                    if options:
+                                        with st.form(key=f"drive_form_{t_id}"):
+                                            sel_u = st.selectbox("Wer?", list(options.keys()), format_func=lambda x: options[x], label_visibility="collapsed")
+                                            seats = st.number_input("Freie Plätze (ohne Fahrer)", min_value=1, max_value=8, value=3)
+                                            if st.form_submit_button("🚀 Übernehmen", use_container_width=True):
+                                                kommentar_text = f"({seats} freie Plätze)"
+                                                success, msg = accept_task(t_id, sel_u, kommentar_text)
+                                                if success: st.rerun()
+                                    else:
+                                        st.success("✅ Aus deiner Familie ist bereits jemand eingetragen.")
+
+        if not found_driver_task:
+            st.info("Aktuell sind alle Auswärtsfahrten deiner Teams abgedeckt oder es stehen keine an.")
+            
+        st.divider()
         
         col1, col2 = st.columns(2)
         
@@ -610,6 +673,12 @@ else:
             found_open = False
             if not tasks_df.empty:
                 for _, tsk in tasks_df.iterrows():
+                    if 'fahr' in str(tsk['kategorie']).lower() or 'auto' in str(tsk['kategorie']).lower():
+                        if pd.notna(tsk.get('event_id')):
+                            ev_r = events_df[events_df['event_id'] == tsk['event_id']]
+                            if not ev_r.empty and 'bocholt' not in str(ev_r.iloc[0].get('ort', '')).lower():
+                                continue
+
                     if is_relevant(tsk.get('betroffene_teams')):
                         t_id = tsk['task_id']
                         t_assigns = assign_df[assign_df['task_id'] == t_id] if not assign_df.empty else pd.DataFrame()
@@ -642,16 +711,23 @@ else:
                                     options = {k: v for k, v in options.items() if k not in t_assigns['user_id'].tolist()}
                                 
                                 if options:
-                                    # CATERING LOGIK FÜR DASHBOARD
-                                    if "catering" in str(tsk['kategorie']).lower():
-                                        with st.form(key=f"dash_cat_{t_id}"):
+                                    kat_lower = str(tsk['kategorie']).lower()
+                                    if "catering" in kat_lower or "fahr" in kat_lower or "auto" in kat_lower:
+                                        with st.form(key=f"dash_form_{t_id}"):
                                             sel_u = st.selectbox("Wer?", list(options.keys()), format_func=lambda x: options[x], label_visibility="collapsed")
-                                            beitrag = st.text_input("Was bringst du mit?", placeholder="z.B. Kuchen, Salat, Brezeln")
-                                            if st.form_submit_button("Übernehmen", use_container_width=True):
-                                                if not beitrag.strip():
-                                                    st.warning("Bitte trage ein, was du mitbringst.")
-                                                else:
-                                                    success, msg = accept_task(t_id, sel_u, beitrag)
+                                            
+                                            if "catering" in kat_lower:
+                                                kommentar = st.text_input("Was bringst du mit?", placeholder="z.B. Kuchen, Salat")
+                                                if st.form_submit_button("Übernehmen", use_container_width=True):
+                                                    if not kommentar.strip():
+                                                        st.warning("Bitte fülle das Feld aus.")
+                                                    else:
+                                                        success, msg = accept_task(t_id, sel_u, kommentar)
+                                                        if success: st.rerun()
+                                            else:
+                                                seats = st.number_input("Freie Plätze (ohne Fahrer)", min_value=1, max_value=8, value=3)
+                                                if st.form_submit_button("🚀 Übernehmen", use_container_width=True):
+                                                    success, msg = accept_task(t_id, sel_u, f"({seats} freie Plätze)")
                                                     if success: st.rerun()
                                     else:
                                         c_sel, c_btn = st.columns([2, 1])
@@ -669,6 +745,20 @@ else:
 
         with col2:
             st.markdown("#### ✅ Deine übernommenen Aufgaben")
+            
+            @st.dialog("⚠️ Aufgabe wirklich abgeben?")
+            def confirm_cancel(t_id, u_id, t_name, u_name):
+                st.warning(f"Möchtest du die Aufgabe **{t_name}** für **{u_name}** wirklich wieder freigeben?")
+                st.write("Sie rutscht dadurch zurück in die Liste der offenen Aufgaben.")
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("❌ Ja, abgeben", use_container_width=True):
+                        succ, msg = cancel_task(t_id, u_id)
+                        if succ: st.rerun()
+                with c2:
+                    if st.button("Behalten", type="primary", use_container_width=True):
+                        st.rerun()
+                        
             if my_assigned_tids:
                 for t_id in my_assigned_tids:
                     tsk_row = tasks_df[tasks_df['task_id'] == t_id]
@@ -691,8 +781,13 @@ else:
                             st.write(f"**{tsk['kategorie']}**")
                             st.caption(f"{context} | 🗓️ {date_str}")
                             
-                            formatted_names = [format_assignee_name(row) for _, row in fam_assigns.iterrows()]
-                            st.write(f"👷‍♂️ **Eingetragen:** {', '.join(formatted_names)}")
+                            for _, assign_row in fam_assigns.iterrows():
+                                c1, c2 = st.columns([3, 1])
+                                with c1:
+                                    st.write(f"👷‍♂️ {format_assignee_name(assign_row)}")
+                                with c2:
+                                    if st.button("Abgeben", key=f"cancel_{t_id}_{assign_row['user_id']}", use_container_width=True):
+                                        confirm_cancel(t_id, assign_row['user_id'], tsk['kategorie'], assign_row['assignee_name'])
             else:
                 st.info("Du bist aktuell für keine anstehenden Aufgaben eingetragen.")
 
@@ -713,7 +808,22 @@ else:
             for _, ev in events_to_show.iterrows():
                 ev_id = ev['event_id']
                 with st.expander(f"🏐 {ev['titel']} ({ev['start_zeit']})", expanded=False):
-                    st.write(f"📍 **Ort:** {ev['ort']} | 👕 **Teams:** {ev['betroffene_teams']}")
+                    
+                    ort_text = ev.get('ort')
+                    if pd.isna(ort_text) or not str(ort_text).strip():
+                        ort_text = "⚠️ Noch nicht festgelegt"
+                        
+                    st.write(f"📍 **Ort:** {ort_text} | 👕 **Teams:** {ev['betroffene_teams']}")
+                    
+                    if "⚠️" in ort_text and user['rolle'] in ['Admin', 'Organisator', 'Trainer']:
+                        with st.form(f"form_ort_{ev_id}"):
+                            c1, c2 = st.columns([3, 1])
+                            with c1:
+                                neuer_ort = st.text_input("Austragungsort nachtragen:", label_visibility="collapsed", placeholder="z.B. Sporthalle Lowick")
+                            with c2:
+                                if st.form_submit_button("Speichern", use_container_width=True) and neuer_ort:
+                                    update_event_location(ev_id, neuer_ort)
+                                    st.rerun()
                     
                     st.markdown("#### 🏃‍♂️ Spieler-Teilnahme")
                     attendance_df = all_attendance_df[all_attendance_df['event_id'] == ev_id] if not all_attendance_df.empty else pd.DataFrame()
@@ -778,20 +888,27 @@ else:
                                 
                                 if cur_h < max_h:
                                     if options:
-                                        # CATERING LOGIK FÜR EVENTS
-                                        if "catering" in str(tsk['kategorie']).lower():
-                                            with st.form(key=f"ev_cat_{t_id}"):
+                                        kat_lower = str(tsk['kategorie']).lower()
+                                        if "catering" in kat_lower or "fahr" in kat_lower or "auto" in kat_lower:
+                                            with st.form(key=f"ev_form_{t_id}"):
                                                 sel_u = st.selectbox("Wer?", list(options.keys()), format_func=lambda x: options[x], label_visibility="collapsed")
-                                                beitrag = st.text_input("Was bringst du mit?", placeholder="z.B. Kuchen")
-                                                if st.form_submit_button("Eintragen", use_container_width=True):
-                                                    if not beitrag.strip():
-                                                        st.warning("Bitte trage ein, was du mitbringst.")
-                                                    else:
-                                                        success, msg = accept_task(t_id, sel_u, beitrag)
+                                                
+                                                if "catering" in kat_lower:
+                                                    kommentar = st.text_input("Was bringst du mit?", placeholder="z.B. Kuchen")
+                                                    if st.form_submit_button("Eintragen", use_container_width=True):
+                                                        if not kommentar.strip():
+                                                            st.warning("Bitte fülle das Feld aus.")
+                                                        else:
+                                                            success, msg = accept_task(t_id, sel_u, kommentar)
+                                                            if success: st.rerun()
+                                                else:
+                                                    seats = st.number_input("Freie Plätze (ohne Fahrer)", min_value=1, max_value=8, value=3)
+                                                    if st.form_submit_button("🚀 Eintragen", use_container_width=True):
+                                                        success, msg = accept_task(t_id, sel_u, f"({seats} freie Plätze)")
                                                         if success: st.rerun()
                                         else:
                                             sel_u = st.selectbox("Wer?", list(options.keys()), format_func=lambda x: options[x], key=f"sel_ev_{t_id}", label_visibility="collapsed")
-                                            if st.button("Eintragen", key=f"btn_ev_{t_id}"):
+                                            if st.button("Eintragen", key=f"btn_ev_{t_id}", use_container_width=True):
                                                 success, msg = accept_task(t_id, sel_u)
                                                 if success: st.rerun()
                                     else: st.success("✅ Familie komplett eingetragen.")
@@ -881,7 +998,7 @@ else:
     # TAB 2: FREIE AUFGABEN
     # ----------------------------------------------------
     with tab_tasks:
-        if user['rolle'] in ['Admin', 'Organisator']:
+        if user['rolle'] in ['Admin', 'Organisator', 'Trainer']:
             with st.expander("➕ Allgemeine Aufgabe anlegen (Ohne Event-Bezug)"):
                 with st.form("new_task_form"):
                     k_sel = st.selectbox("Kategorie", KATEGORIE_OPTIONEN)
@@ -928,16 +1045,22 @@ else:
                         
                         if cur_h < max_h:
                             if options:
-                                # CATERING LOGIK FÜR FREIE AUFGABEN
-                                if "catering" in str(row['kategorie']).lower():
-                                    with st.form(key=f"free_cat_{t_id}"):
+                                kat_lower = str(row['kategorie']).lower()
+                                if "catering" in kat_lower or "fahr" in kat_lower or "auto" in kat_lower:
+                                    with st.form(key=f"free_form_{t_id}"):
                                         sel_u = st.selectbox("Wer?", list(options.keys()), format_func=lambda x: options[x], label_visibility="collapsed")
-                                        beitrag = st.text_input("Was bringst du mit?", placeholder="z.B. Kuchen")
-                                        if st.form_submit_button("Übernehmen", use_container_width=True):
-                                            if not beitrag.strip():
-                                                st.warning("Bitte trage ein, was du mitbringst.")
-                                            else:
-                                                accept_task(t_id, sel_u, beitrag); st.rerun()
+                                        
+                                        if "catering" in kat_lower:
+                                            kommentar = st.text_input("Was bringst du mit?", placeholder="z.B. Kuchen")
+                                            if st.form_submit_button("Übernehmen", use_container_width=True):
+                                                if not kommentar.strip():
+                                                    st.warning("Bitte fülle das Feld aus.")
+                                                else:
+                                                    accept_task(t_id, sel_u, kommentar); st.rerun()
+                                        else:
+                                            seats = st.number_input("Freie Plätze (ohne Fahrer)", min_value=1, max_value=8, value=3)
+                                            if st.form_submit_button("🚀 Übernehmen", use_container_width=True):
+                                                accept_task(t_id, sel_u, f"({seats} freie Plätze)"); st.rerun()
                                 else:
                                     sel_u = st.selectbox("Wer?", list(options.keys()), format_func=lambda x: options[x], key=f"sel_f_{t_id}", label_visibility="collapsed")
                                     if st.button("Übernehmen", key=f"btn_f_{t_id}", use_container_width=True):
@@ -945,7 +1068,7 @@ else:
                             else: st.success("✅ Eingetragen.")
                         else: st.success("✅ Voll!")
                         
-                        if user['rolle'] == 'Admin' or row.get('erstellt_von') == user['user_id']:
+                        if user['rolle'] in ['Admin', 'Organisator'] or row.get('erstellt_von') == user['user_id']:
                             if st.button("🗑️ Löschen", key=f"del_f_{t_id}"): delete_task(t_id); st.rerun()
                 st.divider()
         else: st.info("Aktuell keine allgemeinen Aufgaben.")
@@ -1071,25 +1194,6 @@ else:
             st.divider()
             st.subheader("👥 User-Verwaltung")
             st.dataframe(all_users_df, use_container_width=True)
-            
-            st.divider()
-            st.subheader("🔑 Passwort zurücksetzen")
-            st.write("Vergib hier ein neues Passwort für Nutzer, die ihres vergessen haben.")
-            with st.form("reset_pw_form"):
-                opts = {r['user_id']: f"{r['name']} ({r['email']})" for _, r in all_users_df.iterrows()}
-                reset_id = st.selectbox("Benutzer auswählen:", list(opts.keys()), format_func=lambda x: opts[x])
-                new_pw = st.text_input("Neues Passwort", type="password")
-                
-                if st.form_submit_button("Passwort überschreiben"):
-                    if new_pw.strip() == "":
-                        st.warning("Bitte ein gültiges Passwort eingeben.")
-                    else:
-                        succ, msg = reset_password(reset_id, new_pw)
-                        if succ: 
-                            st.success(f"{msg} Der Nutzer kann sich nun mit dem neuen Passwort einloggen.")
-                        else: 
-                            st.error(msg)
-
             with st.form("del_u"):
                 opts = {r['user_id']: f"{r['name']} ({r['rolle']})" for _, r in all_users_df.iterrows()}
                 d_id = st.selectbox("Löschen:", list(opts.keys()), format_func=lambda x: opts[x])
