@@ -48,7 +48,7 @@ with st.sidebar:
         Die Daten werden sicher und verschlüsselt in einer Supabase-Datenbank auf europäischen Servern gespeichert.
         """)
     st.divider()
-    st.caption("App-Version 2.3 (Supabase, Fahrer & Orte) | Status: Online 🟢")
+    st.caption("App-Version 2.4 (Trainer-Rechte & Orte) | Status: Online 🟢")
 
 def inject_custom_css():
     st.markdown("""
@@ -747,14 +747,12 @@ else:
                 ev_id = ev['event_id']
                 with st.expander(f"🏐 {ev['titel']} ({ev['start_zeit']})", expanded=False):
                     
-                    # Ort prüfen und formatiert anzeigen
                     ort_text = ev.get('ort')
                     if pd.isna(ort_text) or not str(ort_text).strip():
                         ort_text = "⚠️ Noch nicht festgelegt"
                         
                     st.write(f"📍 **Ort:** {ort_text} | 👕 **Teams:** {ev['betroffene_teams']}")
                     
-                    # Eingabefeld anzeigen, wenn der Ort leer ist und der User Rechte hat
                     if "⚠️" in ort_text and user['rolle'] in ['Admin', 'Organisator', 'Trainer']:
                         with st.form(f"form_ort_{ev_id}"):
                             c1, c2 = st.columns([3, 1])
@@ -911,7 +909,7 @@ else:
     # TAB 2: FREIE AUFGABEN
     # ----------------------------------------------------
     with tab_tasks:
-        if user['rolle'] in ['Admin', 'Organisator']:
+        if user['rolle'] in ['Admin', 'Organisator', 'Trainer']:
             with st.expander("➕ Allgemeine Aufgabe anlegen (Ohne Event-Bezug)"):
                 with st.form("new_task_form"):
                     k = st.text_input("Kategorie")
@@ -960,7 +958,7 @@ else:
                             else: st.success("✅ Eingetragen.")
                         else: st.success("✅ Voll!")
                         
-                        if user['rolle'] == 'Admin' or row.get('erstellt_von') == user['user_id']:
+                        if user['rolle'] in ['Admin', 'Organisator'] or row.get('erstellt_von') == user['user_id']:
                             if st.button("🗑️ Löschen", key=f"del_f_{t_id}"): delete_task(t_id); st.rerun()
                 st.divider()
         else: st.info("Aktuell keine allgemeinen Aufgaben.")
