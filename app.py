@@ -48,7 +48,7 @@ with st.sidebar:
         Die Daten werden sicher und verschlüsselt in einer Supabase-Datenbank auf europäischen Servern gespeichert.
         """)
     st.divider()
-    st.caption("App-Version 2.2 (Supabase & Fahrer-Logik) | Status: Online 🟢")
+    st.caption("App-Version 2.3 (Supabase, Fahrer & Orte) | Status: Online 🟢")
 
 def inject_custom_css():
     st.markdown("""
@@ -206,7 +206,6 @@ def update_db_schema(_engine):
             );
         """))
         
-        # NEU: Spalte für Sitzplätze/Kommentare bei Aufgaben hinzufügen
         try:
             conn.execute(text("ALTER TABLE task_assignments ADD COLUMN IF NOT EXISTS kommentar TEXT;"))
         except Exception: pass
@@ -424,6 +423,15 @@ def delete_event(event_id):
         return True, "Spieltag inkl. Aufgaben gelöscht!"
     except Exception as e: return False, str(e)
 
+def update_event_location(event_id, neuer_ort):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE events SET ort = :ort WHERE event_id = :id"), {"ort": neuer_ort, "id": event_id})
+        clear_caches()
+        return True
+    except Exception:
+        return False
+
 def set_event_attendance(event_id, user_id, status):
     try:
         with engine.begin() as conn:
@@ -447,7 +455,6 @@ def accept_task(task_id, user_id, kommentar=None):
         return True, "Übernommen!"
     except Exception as e: return False, str(e)
 
-# Hilfsfunktion für die Anzeige des Namens inkl. Kommentar (z.B. Sitzplätze)
 def format_assignee_name(row):
     return f"{row['assignee_name']} {row['kommentar'] if pd.notna(row.get('kommentar')) else ''}"
 
@@ -567,10 +574,8 @@ else:
         if not children_df.empty:
             my_family_uids.extend(children_df['user_id'].tolist())
             
-        # NEU: Das .unique() löst das Button-Problem, wenn zwei Familienmitglieder die gleiche Schicht machen!
         my_assigned_tids = assign_df[assign_df['user_id'].isin(my_family_uids)]['task_id'].unique().tolist() if not assign_df.empty else []
         
-        # --- HIGHLIGHT FÜR AUSWÄRTSSPIELE (FAHRER GESUCHT) ---
         st.markdown("### 🚗 Fahrer für Auswärtsspiele gesucht!")
         found_driver_task = False
         
@@ -629,7 +634,6 @@ else:
             found_open = False
             if not tasks_df.empty:
                 for _, tsk in tasks_df.iterrows():
-                    # Filtere die Fahrer-Aufgaben hier heraus, da sie schon oben stehen
                     if 'fahr' in str(tsk['kategorie']).lower() or 'auto' in str(tsk['kategorie']).lower():
                         if pd.notna(tsk.get('event_id')):
                             ev_r = events_df[events_df['event_id'] == tsk['event_id']]
@@ -742,7 +746,24 @@ else:
             for _, ev in events_to_show.iterrows():
                 ev_id = ev['event_id']
                 with st.expander(f"🏐 {ev['titel']} ({ev['start_zeit']})", expanded=False):
-                    st.write(f"📍 **Ort:** {ev['ort']} | 👕 **Teams:** {ev['betroffene_teams']}")
+                    
+                    # Ort prüfen und formatiert anzeigen
+                    ort_text = ev.get('ort')
+                    if pd.isna(ort_text) or not str(ort_text).strip():
+                        ort_text = "⚠️ Noch nicht festgelegt"
+                        
+                    st.write(f"📍 **Ort:** {ort_text} | 👕 **Teams:** {ev['betroffene_teams']}")
+                    
+                    # Eingabefeld anzeigen, wenn der Ort leer ist und der User Rechte hat
+                    if "⚠️" in ort_text and user['rolle'] in ['Admin', 'Organisator', 'Trainer']:
+                        with st.form(f"form_ort_{ev_id}"):
+                            c1, c2 = st.columns([3, 1])
+                            with c1:
+                                neuer_ort = st.text_input("Austragungsort nachtragen:", label_visibility="collapsed", placeholder="z.B. Sporthalle Lowick")
+                            with c2:
+                                if st.form_submit_button("Speichern", use_container_width=True) and neuer_ort:
+                                    update_event_location(ev_id, neuer_ort)
+                                    st.rerun()
                     
                     st.markdown("#### 🏃‍♂️ Spieler-Teilnahme")
                     attendance_df = all_attendance_df[all_attendance_df['event_id'] == ev_id] if not all_attendance_df.empty else pd.DataFrame()
