@@ -652,7 +652,7 @@ else:
                                     
                                     if options:
                                         with st.form(key=f"drive_form_{t_id}"):
-                                            sel_u = st.selectbox("Wer?", list(options.keys()), format_func=lambda x: options[x], label_visibility="collapsed")
+                                            sel_u = st.selectbox("Wer fährt?", list(options.keys()), format_func=lambda x: options[x], label_visibility="collapsed")
                                             seats = st.number_input("Freie Plätze (ohne Fahrer)", min_value=1, max_value=8, value=3)
                                             if st.form_submit_button("🚀 Übernehmen", use_container_width=True):
                                                 kommentar_text = f"({seats} freie Plätze)"
@@ -921,7 +921,8 @@ else:
                     else:
                         st.info("Noch keine Aufgaben für dieses Event hinterlegt.")
                         
-                    if user['rolle'] in ['Admin', 'Organisator']:
+                    # HIER DAS UPDATE: TRAINER HINZUGEFÜGT
+                    if user['rolle'] in ['Admin', 'Organisator', 'Trainer']:
                         st.markdown("➕ **Neuen Orga-Punkt erstellen**")
                         with st.form(f"form_ev_{ev_id}"):
                             nk_sel = st.selectbox("Kategorie / Was wird gebraucht?", KATEGORIE_OPTIONEN)
