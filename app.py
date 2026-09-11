@@ -48,7 +48,7 @@ with st.sidebar:
         Die Daten werden sicher und verschlüsselt in einer Supabase-Datenbank auf europäischen Servern gespeichert.
         """)
     st.divider()
-    st.caption("App-Version 2.1 (Supabase & Fahrer-Logik) | Status: Online 🟢")
+    st.caption("App-Version 2.2 (Supabase & Fahrer-Logik) | Status: Online 🟢")
 
 def inject_custom_css():
     st.markdown("""
@@ -567,7 +567,8 @@ else:
         if not children_df.empty:
             my_family_uids.extend(children_df['user_id'].tolist())
             
-        my_assigned_tids = assign_df[assign_df['user_id'].isin(my_family_uids)]['task_id'].tolist() if not assign_df.empty else []
+        # NEU: Das .unique() löst das Button-Problem, wenn zwei Familienmitglieder die gleiche Schicht machen!
+        my_assigned_tids = assign_df[assign_df['user_id'].isin(my_family_uids)]['task_id'].unique().tolist() if not assign_df.empty else []
         
         # --- HIGHLIGHT FÜR AUSWÄRTSSPIELE (FAHRER GESUCHT) ---
         st.markdown("### 🚗 Fahrer für Auswärtsspiele gesucht!")
