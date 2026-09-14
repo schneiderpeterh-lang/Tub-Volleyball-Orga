@@ -45,7 +45,7 @@ with st.sidebar:
         """)
         
     st.divider()
-    st.caption("App-Version 1.3 | Status: Online 🟢")
+    st.caption("App-Version 1.4 (Inkl. Punktesystem) | Status: Online 🟢")
 
 def inject_custom_css():
     st.markdown("""
@@ -155,6 +155,13 @@ def update_db_schema(_engine):
                 tausch_angefragt INTEGER DEFAULT 0
             );
         """))
+        
+        # Sicherstellen, dass die Punktespalte existiert
+        try:
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS punkte INTEGER DEFAULT 1;"))
+        except Exception:
+            pass
+
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS parent_child (
                 parent_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
@@ -245,8 +252,28 @@ def get_children(parent_id):
     except: return pd.DataFrame()
 
 # ==========================================
-# 4. EVENTS & AUFGABEN SQL
+# 4. EVENTS, AUFGABEN & PUNKTE SQL
 # ==========================================
+@st.cache_data(ttl=60)
+def get_user_points_df():
+    try:
+        with engine.connect() as conn:
+            query = text("""
+                SELECT 
+                    u.user_id,
+                    u.name,
+                    u.rolle,
+                    u.team,
+                    COALESCE(SUM(t.punkte), 0) AS gesamt_punkte
+                FROM users u
+                LEFT JOIN task_assignments ta ON u.user_id = ta.user_id
+                LEFT JOIN tasks t ON ta.task_id = t.task_id
+                GROUP BY u.user_id, u.name, u.rolle, u.team
+            """)
+            return pd.read_sql(query, conn)
+    except Exception:
+        return pd.DataFrame()
+
 @st.cache_data(ttl=60)
 def get_all_events():
     try:
@@ -258,7 +285,7 @@ def get_all_events():
 def get_all_tasks():
     try:
         with engine.connect() as conn: 
-            return pd.read_sql(text("SELECT task_id, event_id, kategorie, beschreibung, max_helfer, erstellt_von, start_zeit, ende_zeit, betroffene_teams FROM tasks ORDER BY task_id DESC"), conn)
+            return pd.read_sql(text("SELECT task_id, event_id, kategorie, beschreibung, max_helfer, punkte, erstellt_von, start_zeit, ende_zeit, betroffene_teams FROM tasks ORDER BY task_id DESC"), conn)
     except: return pd.DataFrame()
 
 @st.cache_data(ttl=60)
@@ -287,13 +314,13 @@ def cancel_task(task_id, user_id):
     except Exception as e:
         return False, str(e)
 
-def create_task(kategorie, beschreibung, max_helfer, user_id, start=None, ende=None, teams=None, event_id=None):
+def create_task(kategorie, beschreibung, max_helfer, punkte, user_id, start=None, ende=None, teams=None, event_id=None):
     try:
         with engine.begin() as conn:
             conn.execute(text("""
-                INSERT INTO tasks (kategorie, beschreibung, max_helfer, erstellt_von, start_zeit, ende_zeit, betroffene_teams, event_id)
-                VALUES (:kat, :besch, :max, :erst, :st, :en, :teams, :ev)
-            """), {"kat": kategorie, "besch": beschreibung, "max": max_helfer, "erst": user_id, "st": start, "en": ende, "teams": teams, "ev": event_id})
+                INSERT INTO tasks (kategorie, beschreibung, max_helfer, punkte, erstellt_von, start_zeit, ende_zeit, betroffene_teams, event_id)
+                VALUES (:kat, :besch, :max, :pkt, :erst, :st, :en, :teams, :ev)
+            """), {"kat": kategorie, "besch": beschreibung, "max": max_helfer, "pkt": punkte, "erst": user_id, "st": start, "en": ende, "teams": teams, "ev": event_id})
         clear_caches()
         return True, "Aufgabe erstellt!"
     except Exception as e: return False, str(e)
@@ -353,6 +380,7 @@ else:
     tasks_df = get_all_tasks()
     assign_df = get_task_assignments()
     events_df = get_all_events()
+    points_df = get_user_points_df()
 
     if not assign_df.empty:
         assign_df['display_name'] = assign_df.apply(
@@ -397,14 +425,47 @@ else:
                 st.rerun()
 
     # ----------------------------------------------------
-    # TAB 0: ÜBERSICHT
+    # TAB 0: ÜBERSICHT (INKLUSIVE PUNKTE)
     # ----------------------------------------------------
     with tab_overview:
+        
+        # Punkte des aktuell eingeloggten Users ermitteln
+        user_points = 0
+        if not points_df.empty and user['user_id'] in points_df['user_id'].values:
+            user_points = int(points_df[points_df['user_id'] == user['user_id']]['gesamt_punkte'].iloc[0])
+
+        st.metric(label="🌟 Deine gesammelten Helferpunkte", value=f"{user_points} Pkt.")
+        
+        # Punkte-Übersicht für Trainer, Orga und Admins
+        if user['rolle'] in ['Admin', 'Organisator', 'Trainer']:
+            with st.expander("📊 Punkte-Übersicht der Elternteile"):
+                if not points_df.empty:
+                    eltern_points = points_df[points_df['rolle'] == 'Elternteil'].copy()
+                    
+                    if user['rolle'] == 'Trainer' and user.get('team'):
+                        trainer_teams = [t.strip() for t in user['team'].split(',')]
+                        eltern_points = eltern_points[eltern_points['team'].apply(
+                            lambda t: any(team in str(t) for team in trainer_teams) if pd.notna(t) else False
+                        )]
+                    
+                    st.dataframe(
+                        eltern_points[['name', 'team', 'gesamt_punkte']].rename(
+                            columns={'name': 'Elternteil', 'team': 'Team', 'gesamt_punkte': 'Punkte'}
+                        ).sort_values(by='Punkte', ascending=False),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else:
+                    st.info("Noch keine Punkte erfasst.")
+                    
+        st.divider()
         st.write("Dein schneller Überblick: Wo wird aktuell Hilfe gebraucht und wofür bist du schon eingetragen?")
         
         my_family_uids = [user['user_id']]
         if not children_df.empty: my_family_uids.extend(children_df['user_id'].tolist())
-        my_assigned_tids = assign_df[assign_df['user_id'].isin(my_family_uids)]['task_id'].tolist() if not assign_df.empty else []
+        
+        # Behebung des Key-Fehlers durch .unique()
+        my_assigned_tids = assign_df[assign_df['user_id'].isin(my_family_uids)]['task_id'].unique().tolist() if not assign_df.empty else []
         
         col1, col2 = st.columns(2)
         
@@ -428,7 +489,7 @@ else:
                                     date_str = ev_row.iloc[0]['start_zeit']
                                     
                             with st.container(border=True):
-                                st.write(f"**{tsk['kategorie']}**")
+                                st.write(f"**{tsk['kategorie']}** ({tsk.get('punkte', 1)} Pkt.)")
                                 st.caption(f"{context} | 🗓️ {date_str}")
                                 st.write(f"👥 Belegt: {cur_h} / {max_h}")
                                 
@@ -466,7 +527,7 @@ else:
         with col2:
             st.markdown("#### ✅ Deine übernommenen Aufgaben")
             if my_assigned_tids:
-                for t_id in set(my_assigned_tids):
+                for t_id in my_assigned_tids:
                     tsk_row = tasks_df[tasks_df['task_id'] == t_id]
                     if not tsk_row.empty:
                         tsk = tsk_row.iloc[0]
@@ -507,7 +568,11 @@ else:
                     k_sel = st.selectbox("Kategorie", KATEGORIE_OPTIONEN)
                     k_free = st.text_input("Eigene Eingabe:")
                     b = st.text_area("Details")
-                    m = st.number_input("Helfer", min_value=1, value=1)
+                    
+                    c_h, c_p = st.columns(2)
+                    with c_h: m = st.number_input("Helfer", min_value=1, value=1)
+                    with c_p: pkt = st.number_input("Punkte", min_value=1, value=1)
+                    
                     t = st.multiselect("Teams", TEAM_LISTE)
                     c1, c2 = st.columns(2)
                     with c1: sd, stt = st.date_input("Start"), st.time_input("Zeit")
@@ -515,5 +580,5 @@ else:
                         final_k = k_free if k_sel == "Sonstiges (Freitext)" else k_sel
                         if final_k:
                             dt_str = f"{sd.strftime('%d.%m.%Y')} {stt.strftime('%H:%M')} Uhr"
-                            create_task(final_k, b, m, user['user_id'], dt_str, None, ", ".join(t) if t else None)
+                            create_task(final_k, b, m, pkt, user['user_id'], dt_str, None, ", ".join(t) if t else None)
                             st.rerun()
