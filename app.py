@@ -206,6 +206,16 @@ def verify_password(password: str, hashed_password: str) -> bool:
     hash_obj = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
     return hash_obj.hex() == hash_hex
 
+def reset_password(user_id, new_password):
+    hashed = hash_password(new_password)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE users SET password_hash = :h WHERE user_id = :u"), {"h": hashed, "u": user_id})
+        clear_caches()
+        return True, "Passwort erfolgreich geändert!"
+    except Exception as e: 
+        return False, str(e)
+
 def clear_caches():
     st.cache_data.clear()
 
@@ -243,11 +253,38 @@ def register_new_user(name, email, password, rolle, team_list):
     except Exception as e:
         return False, str(e)
 
+def add_child(parent_id, child_name, child_team_list):
+    dummy_email = f"kind_{uuid.uuid4().hex[:8]}@tub.lokal"
+    dummy_pass = hash_password(secrets.token_hex(16)) 
+    team_str = ", ".join(child_team_list) if child_team_list else "Kein Team"
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, parent_id, team) VALUES (:n, :e, :h, 'Kind', 1, :p, :t) RETURNING user_id"),
+                {"n": child_name, "e": dummy_email, "h": dummy_pass, "p": parent_id, "t": team_str})
+            conn.execute(text("INSERT INTO parent_child (parent_id, child_id) VALUES (:p, :c) ON CONFLICT DO NOTHING"), {"p": parent_id, "c": res.scalar()})
+        clear_caches()
+        return True, f"{child_name} erfolgreich hinzugefügt!"
+    except Exception as e: return False, str(e)
+
+def link_existing_child(parent_id, child_id):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO parent_child (parent_id, child_id) VALUES (:p, :c) ON CONFLICT DO NOTHING"), {"p": parent_id, "c": child_id})
+        clear_caches()
+        return True, "Verknüpft!"
+    except: return False, "Fehler!"
+
 @st.cache_data(ttl=60)
 def get_children(parent_id):
     try:
         with engine.connect() as conn:
             return pd.read_sql(text("SELECT DISTINCT u.user_id, u.name, u.team FROM users u LEFT JOIN parent_child pc ON u.user_id = pc.child_id WHERE u.parent_id = :p OR pc.parent_id = :p"), conn, params={"p": parent_id})
+    except: return pd.DataFrame()
+
+@st.cache_data(ttl=60)
+def get_all_children_in_db():
+    try:
+        with engine.connect() as conn: return pd.read_sql(text("SELECT user_id, name, team FROM users WHERE rolle = 'Kind' ORDER BY name"), conn)
     except: return pd.DataFrame()
 
 @st.cache_data(ttl=60)
@@ -257,9 +294,55 @@ def get_all_users():
             return pd.read_sql(text("SELECT user_id, name, email, rolle, team FROM users ORDER BY name"), conn)
     except: return pd.DataFrame()
 
+def delete_user(user_id):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM parent_child WHERE parent_id = :id OR child_id = :id"), {"id": user_id})
+            conn.execute(text("UPDATE users SET parent_id = NULL WHERE parent_id = :id"), {"id": user_id})
+            conn.execute(text("DELETE FROM task_assignments WHERE user_id = :id"), {"id": user_id})
+            conn.execute(text("DELETE FROM event_attendance WHERE user_id = :id"), {"id": user_id})
+            conn.execute(text("DELETE FROM users WHERE user_id = :id"), {"id": user_id})
+        clear_caches()
+        return True, "Account gelöscht."
+    except Exception as e: return False, str(e)
+
 # ==========================================
 # 4. EVENTS, AUFGABEN & PUNKTE SQL
 # ==========================================
+def parse_and_import_ics(file_bytes, team_str):
+    try:
+        cal = icalendar.Calendar.from_ical(file_bytes)
+        events_added = 0
+        with engine.begin() as conn:
+            for component in cal.walk():
+                if component.name == "VEVENT":
+                    titel = str(component.get('summary', 'Unbekanntes Event'))
+                    ort = str(component.get('location', ''))
+                    
+                    dtstart = component.get('dtstart')
+                    start_str = ""
+                    if dtstart:
+                        start_dt = dtstart.dt
+                        if isinstance(start_dt, datetime.datetime): start_str = start_dt.strftime('%d.%m.%Y %H:%M')
+                        else: start_str = start_dt.strftime('%d.%m.%Y')
+                        
+                    dtend = component.get('dtend')
+                    ende_str = ""
+                    if dtend:
+                        ende_dt = dtend.dt
+                        if isinstance(ende_dt, datetime.datetime): ende_str = ende_dt.strftime('%d.%m.%Y %H:%M')
+                        else: ende_str = ende_dt.strftime('%d.%m.%Y')
+
+                    conn.execute(text("""
+                        INSERT INTO events (titel, start_zeit, ende_zeit, ort, betroffene_teams)
+                        VALUES (:titel, :start, :ende, :ort, :teams)
+                    """), {"titel": titel, "start": start_str, "ende": ende_str, "ort": ort, "teams": team_str})
+                    events_added += 1
+        clear_caches()
+        return True, f"{events_added} Termine erfolgreich für {team_str} importiert!"
+    except Exception as e:
+        return False, f"Fehler beim ICS Import: {e}"
+
 @st.cache_data(ttl=60)
 def get_user_points_df():
     try:
