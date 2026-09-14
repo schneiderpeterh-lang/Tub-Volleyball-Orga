@@ -45,7 +45,7 @@ with st.sidebar:
         """)
         
     st.divider()
-    st.caption("App-Version 1.5 (Inkl. Punkte & Ort-Korrektur) | Status: Online 🟢")
+    st.caption("App-Version 1.6 (Inkl. Punkte & Bugfixes) | Status: Online 🟢")
 
 def inject_custom_css():
     st.markdown("""
@@ -156,7 +156,6 @@ def update_db_schema(_engine):
             );
         """))
         
-        # Punkte Spalte sicherstellen
         try:
             conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS punkte INTEGER DEFAULT 1;"))
         except Exception:
@@ -505,14 +504,12 @@ else:
     # ----------------------------------------------------
     with tab_overview:
         
-        # Punkte des aktuell eingeloggten Users ermitteln
         user_points = 0
         if not points_df.empty and user['user_id'] in points_df['user_id'].values:
             user_points = int(points_df[points_df['user_id'] == user['user_id']]['gesamt_punkte'].iloc[0])
 
         st.metric(label="🌟 Deine gesammelten Helferpunkte", value=f"{user_points} Pkt.")
         
-        # Punkte-Übersicht für Trainer, Orga und Admins
         if user['rolle'] in ['Admin', 'Organisator', 'Trainer']:
             with st.expander("📊 Punkte-Übersicht der Elternteile"):
                 if not points_df.empty:
@@ -651,7 +648,6 @@ else:
                 ev_id = ev['event_id']
                 with st.expander(f"🏐 {ev['titel']} ({ev['start_zeit']})", expanded=False):
                     
-                    # Ort prüfen und formatiert anzeigen (inklusive Editor)[cite: 2]
                     ort_text = ev.get('ort')
                     if pd.isna(ort_text) or not str(ort_text).strip():
                         ort_text = "⚠️ Noch nicht festgelegt"
