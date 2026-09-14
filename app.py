@@ -56,7 +56,7 @@ with st.sidebar:
         """)
         
     st.divider()
-    st.caption("App-Version 3.0 (CSV Umlaute, TuB-Filter & Punkte) | Status: Online 🟢")
+    st.caption("App-Version 3.1 (Tabs & chronologische Sortierung) | Status: Online 🟢")
 
 def inject_custom_css():
     st.markdown("""
@@ -336,10 +336,8 @@ def delete_user(user_id):
 # ==========================================
 def parse_and_import_csv(file_bytes, team_str):
     try:
-        # 1. Versuche Standard UTF-8
         try:
             content = file_bytes.decode('utf-8')
-        # 2. Fallback für deutsche Excel/SAMS-Exporte (Ä, Ö, Ü)
         except UnicodeDecodeError:
             content = file_bytes.decode('iso-8859-1')
             
@@ -356,7 +354,6 @@ def parse_and_import_csv(file_bytes, team_str):
                 m2 = str(row.get('Mannschaft 2', 'Unbekannt'))
                 schiri = str(row.get('Schiedsgericht', ''))
                 
-                # Überspringe das Spiel, wenn TuB Bocholt weder spielt noch pfeift
                 if 'bocholt' not in m1.lower() and 'bocholt' not in m2.lower() and 'bocholt' not in schiri.lower():
                     continue
                 
@@ -471,7 +468,6 @@ def delete_event(event_id):
     except Exception as e: return False, str(e)
 
 def delete_all_events_for_team(team_name):
-    """Löscht alle Events (inklusive Aufgaben und Teilnahmen), die einem spezifischen Team zugeordnet sind."""
     try:
         with engine.connect() as conn:
             events = pd.read_sql(text("SELECT event_id, betroffene_teams FROM events"), conn)
@@ -612,7 +608,7 @@ elif st.session_state['logged_in_user'] is None:
                 Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben.
                 
                 **Sicherheit:**
-                Die Daten werden sicher und verschlüsselt auf europäischen Servern gespeichert. Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten.
+                Die Daten werden sicher und verschlüsselt gespeichert. Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten.
                 """)
             
             dsgvo = st.checkbox("Ich habe die Datenschutzhinweise gelesen und stimme der Verarbeitung meiner Daten zu.")
@@ -720,74 +716,136 @@ else:
             st.write("Dein schneller Überblick: Wo wird aktuell Hilfe gebraucht und wofür bist du schon eingetragen?")
         
         st.divider()
-        
+
+        # AUFGABEN VORBEREITEN & SORTIEREN
+        def parse_to_datetime(date_str):
+            if pd.isna(date_str) or not str(date_str).strip(): 
+                return datetime.datetime.max
+            try:
+                clean_str = str(date_str).replace(' Uhr', '').replace(',', '').strip()
+                return pd.to_datetime(clean_str, dayfirst=True)
+            except:
+                return datetime.datetime.max
+
+        sorted_tasks = []
+        if not tasks_df.empty:
+            for _, tsk in tasks_df.iterrows():
+                tsk_dict = tsk.to_dict()
+                date_str = tsk_dict.get('start_zeit', 'Kein Datum')
+                context = "📋 Freie Aufgabe"
+                ort = ""
+                
+                if pd.notna(tsk_dict.get('event_id')):
+                    ev_row = events_df[events_df['event_id'] == tsk_dict['event_id']]
+                    if not ev_row.empty:
+                        ev = ev_row.iloc[0]
+                        context = f"🏆 {ev['titel']}"
+                        date_str = ev['start_zeit']
+                        ort = str(ev.get('ort', '')).lower()
+                        tsk_dict['event_titel'] = ev['titel']
+                        tsk_dict['event_ort'] = ev['ort']
+                        
+                tsk_dict['display_date'] = date_str
+                tsk_dict['context'] = context
+                tsk_dict['ort'] = ort
+                tsk_dict['sort_date'] = parse_to_datetime(date_str)
+                sorted_tasks.append(tsk_dict)
+                
+            sorted_tasks.sort(key=lambda x: x['sort_date'])
+
         my_assigned_tids = assign_df[assign_df['user_id'].isin(my_family_uids)]['task_id'].unique().tolist() if not assign_df.empty else []
         
+        # --- HIGHLIGHT: FAHRER ---
         st.markdown("### 🚗 Fahrer für Auswärtsspiele gesucht!")
         found_driver_task = False
-        
-        if not tasks_df.empty and not events_df.empty:
-            driver_tasks = tasks_df[tasks_df['kategorie'].str.contains('Fahr|Auto', case=False, na=False)]
+        for tsk in sorted_tasks:
+            if not is_relevant(tsk.get('betroffene_teams')): continue
+            kategorie = str(tsk.get('kategorie', '')).lower()
             
-            for _, tsk in driver_tasks.iterrows():
-                if not is_relevant(tsk.get('betroffene_teams')): continue
-                
+            if 'fahr' in kategorie or 'auto' in kategorie:
                 t_id = tsk['task_id']
                 t_assigns = assign_df[assign_df['task_id'] == t_id] if not assign_df.empty else pd.DataFrame()
                 cur_h = len(t_assigns)
                 max_h = int(tsk.get('max_helfer', 1))
                 
                 if cur_h < max_h and pd.notna(tsk.get('event_id')):
-                    ev_row = events_df[events_df['event_id'] == tsk['event_id']]
-                    if not ev_row.empty:
-                        ev = ev_row.iloc[0]
-                        ort = str(ev.get('ort', '')).lower()
-                        
-                        if 'bocholt' not in ort and ort.strip() != '':
-                            found_driver_task = True
-                            with st.container(border=True):
-                                c_info, c_action = st.columns([3, 2])
-                                with c_info:
-                                    st.error(f"**{ev['titel']}**")
-                                    st.write(f"📍 **Ziel:** {ev['ort']} | 🗓️ {ev['start_zeit']}")
-                                    st.caption(f"Gesucht: {tsk['kategorie']} ({cur_h}/{max_h} belegt)")
-                                with c_action:
-                                    options = {user['user_id']: "Ich fahre selbst"}
-                                    if not children_df.empty:
-                                        for _, child in children_df.iterrows(): options[child['user_id']] = f"Fahre für Kind: {child['name']}"
-                                    if not t_assigns.empty:
-                                        options = {k: v for k, v in options.items() if k not in t_assigns['user_id'].tolist()}
-                                    
-                                    if options:
-                                        with st.form(key=f"drive_form_{t_id}"):
-                                            sel_u = st.selectbox("Wer fährt?", list(options.keys()), format_func=lambda x: options[x], label_visibility="collapsed")
-                                            seats = st.number_input("Freie Plätze (ohne Fahrer)", min_value=1, max_value=8, value=3)
-                                            if st.form_submit_button("🚀 Übernehmen", use_container_width=True):
-                                                kommentar_text = f"({seats} freie Plätze)"
-                                                success, msg = accept_task(t_id, sel_u, kommentar_text)
-                                                if success: st.rerun()
-                                    else:
-                                        st.success("✅ Aus deiner Familie ist bereits jemand eingetragen.")
+                    ort = tsk.get('ort', '')
+                    if 'bocholt' not in ort and ort.strip() != '':
+                        found_driver_task = True
+                        with st.container(border=True):
+                            c_info, c_action = st.columns([3, 2])
+                            with c_info:
+                                st.error(f"**{tsk.get('event_titel', 'Event')}**")
+                                st.write(f"📍 **Ziel:** {tsk.get('event_ort', ort)} | 🗓️ {tsk['display_date']}")
+                                st.caption(f"Gesucht: {tsk['kategorie']} ({cur_h}/{max_h} belegt)")
+                            with c_action:
+                                options = {user['user_id']: "Ich fahre selbst"}
+                                if not children_df.empty:
+                                    for _, child in children_df.iterrows(): options[child['user_id']] = f"Fahre für Kind: {child['name']}"
+                                if not t_assigns.empty:
+                                    options = {k: v for k, v in options.items() if k not in t_assigns['user_id'].tolist()}
+                                
+                                if options:
+                                    with st.form(key=f"drive_form_{t_id}"):
+                                        sel_u = st.selectbox("Wer fährt?", list(options.keys()), format_func=lambda x: options[x], label_visibility="collapsed")
+                                        seats = st.number_input("Freie Plätze (ohne Fahrer)", min_value=1, max_value=8, value=3)
+                                        if st.form_submit_button("🚀 Übernehmen", use_container_width=True):
+                                            kommentar_text = f"({seats} freie Plätze)"
+                                            success, msg = accept_task(t_id, sel_u, kommentar_text)
+                                            if success: st.rerun()
+                                else:
+                                    st.success("✅ Aus deiner Familie ist bereits jemand eingetragen.")
 
         if not found_driver_task:
             st.info("Aktuell sind alle Auswärtsfahrten deiner Teams abgedeckt oder es stehen keine an.")
             
         st.divider()
         
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("#### 🚨 Hilfe dringend gesucht")
-            found_open = False
-            if not tasks_df.empty:
-                for _, tsk in tasks_df.iterrows():
-                    if 'fahr' in str(tsk['kategorie']).lower() or 'auto' in str(tsk['kategorie']).lower():
-                        if pd.notna(tsk.get('event_id')):
-                            ev_r = events_df[events_df['event_id'] == tsk['event_id']]
-                            if not ev_r.empty and 'bocholt' not in str(ev_r.iloc[0].get('ort', '')).lower():
-                                continue
+        @st.dialog("⚠️ Aufgabe wirklich abgeben?")
+        def confirm_cancel(t_id, u_id, t_name, u_name):
+            st.warning(f"Möchtest du die Aufgabe **{t_name}** für **{u_name}** wirklich wieder freigeben?")
+            st.write("Sie rutscht dadurch zurück in die Liste der offenen Aufgaben.")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("❌ Ja, abgeben", use_container_width=True):
+                    succ, msg = cancel_task(t_id, u_id)
+                    if succ: st.rerun()
+            with c2:
+                if st.button("Behalten", type="primary", use_container_width=True):
+                    st.rerun()
 
-                    if is_relevant(tsk.get('betroffene_teams')):
+        # --- UNTERKATEGORIEN (TABS) FÜR MANNSCHAFTEN ---
+        overview_teams = TEAM_LISTE if user['rolle'] in ['Admin', 'Organisator'] else sorted(list(my_teams))
+        if not overview_teams:
+            overview_teams = []
+            
+        overview_tabs_list = ["Alle"] + overview_teams
+        ov_tabs = st.tabs([f"🌍 Alle"] + [f"🏐 {t}" for t in overview_teams])
+        
+        for idx, tab_name in enumerate(overview_tabs_list):
+            with ov_tabs[idx]:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("#### 🚨 Hilfe dringend gesucht")
+                    found_open = False
+                    
+                    for tsk in sorted_tasks:
+                        # Auswärtsfahrten überspringen (wurden schon in der roten Box oben gezeigt)
+                        kategorie = str(tsk.get('kategorie', '')).lower()
+                        if 'fahr' in kategorie or 'auto' in kategorie:
+                            if pd.notna(tsk.get('event_id')) and 'bocholt' not in tsk.get('ort', ''):
+                                continue
+                                
+                        teams_str = str(tsk.get('betroffene_teams', ''))
+                        
+                        # Tab-spezifische Filter Logik
+                        if tab_name != "Alle":
+                            if pd.isna(teams_str) or not teams_str.strip() or tab_name not in [t.strip() for t in teams_str.split(',')]:
+                                continue
+                        else:
+                            if not is_relevant(teams_str): continue
+                            
                         t_id = tsk['task_id']
                         t_assigns = assign_df[assign_df['task_id'] == t_id] if not assign_df.empty else pd.DataFrame()
                         cur_h = len(t_assigns)
@@ -795,20 +853,9 @@ else:
                         
                         if cur_h < max_h:
                             found_open = True
-                            context = ""
-                            date_str = ""
-                            if pd.notna(tsk.get('event_id')):
-                                ev_row = events_df[events_df['event_id'] == tsk['event_id']]
-                                if not ev_row.empty:
-                                    context = f"🏆 {ev_row.iloc[0]['titel']}"
-                                    date_str = ev_row.iloc[0]['start_zeit']
-                            else:
-                                context = "📋 Freie Aufgabe"
-                                date_str = tsk.get('start_zeit', 'Kein Datum')
-                                
                             with st.container(border=True):
                                 st.write(f"**{tsk['kategorie']}** (⭐ {tsk.get('punkte', 1)} Pkt.)")
-                                st.caption(f"{context} | 🗓️ {date_str}")
+                                st.caption(f"{tsk['context']} | 🗓️ {tsk['display_date']}")
                                 st.write(f"👥 Belegt: {cur_h} / {max_h}")
                                 
                                 options = {user['user_id']: "Ich selbst"}
@@ -818,60 +865,46 @@ else:
                                     options = {k: v for k, v in options.items() if k not in t_assigns['user_id'].tolist()}
                                 
                                 if options:
-                                    render_task_accept_ui(tsk, options, key_prefix="dash")
+                                    render_task_accept_ui(tsk, options, key_prefix=f"dash_ov_{idx}")
                                 else:
                                     st.success("✅ Familie bereits eingetragen.")
                                     
-            if not found_open:
-                st.success("Aktuell sind alle Aufgaben für deine Teams belegt. Super!")
+                    if not found_open:
+                        st.success("In diesem Bereich sind aktuell alle Aufgaben belegt. Super!")
 
-        with col2:
-            st.markdown("#### ✅ Deine übernommenen Aufgaben")
-            
-            @st.dialog("⚠️ Aufgabe wirklich abgeben?")
-            def confirm_cancel(t_id, u_id, t_name, u_name):
-                st.warning(f"Möchtest du die Aufgabe **{t_name}** für **{u_name}** wirklich wieder freigeben?")
-                st.write("Sie rutscht dadurch zurück in die Liste der offenen Aufgaben.")
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("❌ Ja, abgeben", use_container_width=True):
-                        succ, msg = cancel_task(t_id, u_id)
-                        if succ: st.rerun()
-                with c2:
-                    if st.button("Behalten", type="primary", use_container_width=True):
-                        st.rerun()
-
-            if my_assigned_tids:
-                for t_id in my_assigned_tids:
-                    tsk_row = tasks_df[tasks_df['task_id'] == t_id]
-                    if not tsk_row.empty:
-                        tsk = tsk_row.iloc[0]
-                        fam_assigns = assign_df[(assign_df['task_id'] == t_id) & (assign_df['user_id'].isin(my_family_uids))]
-                        
-                        context = ""
-                        date_str = ""
-                        if pd.notna(tsk.get('event_id')):
-                            ev_row = events_df[events_df['event_id'] == tsk['event_id']]
-                            if not ev_row.empty:
-                                context = f"🏆 {ev_row.iloc[0]['titel']}"
-                                date_str = ev_row.iloc[0]['start_zeit']
-                        else:
-                            context = "📋 Freie Aufgabe"
-                            date_str = tsk.get('start_zeit', 'Kein Datum')
+                with col2:
+                    st.markdown("#### ✅ Deine übernommenen Aufgaben")
+                    found_mine = False
+                    
+                    if my_assigned_tids:
+                        for t_id in my_assigned_tids:
+                            tsk = next((item for item in sorted_tasks if item["task_id"] == t_id), None)
+                            if not tsk: continue
                             
-                        with st.container(border=True):
-                            st.write(f"**{tsk['kategorie']}** (⭐ {tsk.get('punkte', 1)} Pkt.)")
-                            st.caption(f"{context} | 🗓️ {date_str}")
+                            teams_str = str(tsk.get('betroffene_teams', ''))
+                            if tab_name != "Alle":
+                                if pd.isna(teams_str) or not teams_str.strip() or tab_name not in [t.strip() for t in teams_str.split(',')]:
+                                    continue
+                            else:
+                                if not is_relevant(teams_str): continue
+                                
+                            found_mine = True
+                            fam_assigns = assign_df[(assign_df['task_id'] == t_id) & (assign_df['user_id'].isin(my_family_uids))]
                             
-                            for _, assign_row in fam_assigns.iterrows():
-                                c1, c2 = st.columns([3, 1])
-                                with c1:
-                                    st.write(f"👷‍♂️ {format_assignee_name(assign_row)}")
-                                with c2:
-                                    if st.button("Abgeben", key=f"cancel_{t_id}_{assign_row['user_id']}", use_container_width=True):
-                                        confirm_cancel(t_id, assign_row['user_id'], tsk['kategorie'], assign_row['assignee_name'])
-            else:
-                st.info("Du bist aktuell für keine anstehenden Aufgaben eingetragen.")
+                            with st.container(border=True):
+                                st.write(f"**{tsk['kategorie']}** (⭐ {tsk.get('punkte', 1)} Pkt.)")
+                                st.caption(f"{tsk['context']} | 🗓️ {tsk['display_date']}")
+                                
+                                for _, assign_row in fam_assigns.iterrows():
+                                    c1_sub, c2_sub = st.columns([3, 1])
+                                    with c1_sub:
+                                        st.write(f"👷‍♂️ {format_assignee_name(assign_row)}")
+                                    with c2_sub:
+                                        if st.button("Abgeben", key=f"cancel_{t_id}_{assign_row['user_id']}_tab_{idx}", use_container_width=True):
+                                            confirm_cancel(t_id, assign_row['user_id'], tsk['kategorie'], assign_row['assignee_name'])
+                    
+                    if not found_mine:
+                        st.info("Du bist in dieser Ansicht aktuell für keine anstehenden Aufgaben eingetragen.")
 
     # ----------------------------------------------------
     # TAB 1: SPIELTAGE & EVENTS
@@ -1143,8 +1176,10 @@ else:
                 for _, tk in tasks_df[tasks_df['event_id'].isna() & tasks_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
                     start_iso = parse_to_iso(tk.get('start_zeit'))
                     if start_iso:
+                        icon = "哨" if "schiedsgericht" in str(tk['kategorie']).lower() else "📋"
+                        
                         calendar_events.append({
-                            "title": f"📋 {tk['kategorie']} ({tk.get('betroffene_teams', 'Alle')})",
+                            "title": f"{icon} {tk['kategorie']} ({tk.get('betroffene_teams', 'Alle')})",
                             "start": start_iso,
                             "end": start_iso,
                             "backgroundColor": "#f9ab00",  
