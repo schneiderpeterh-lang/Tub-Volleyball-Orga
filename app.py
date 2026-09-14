@@ -56,7 +56,7 @@ with st.sidebar:
         """)
         
     st.divider()
-    st.caption("App-Version 2.8 (Massen-Löschen & TuB-Filter CSV) | Status: Online 🟢")
+    st.caption("App-Version 3.0 (CSV Umlaute, TuB-Filter & Punkte) | Status: Online 🟢")
 
 def inject_custom_css():
     st.markdown("""
@@ -336,7 +336,13 @@ def delete_user(user_id):
 # ==========================================
 def parse_and_import_csv(file_bytes, team_str):
     try:
-        content = file_bytes.decode('utf-8', errors='replace')
+        # 1. Versuche Standard UTF-8
+        try:
+            content = file_bytes.decode('utf-8')
+        # 2. Fallback für deutsche Excel/SAMS-Exporte (Ä, Ö, Ü)
+        except UnicodeDecodeError:
+            content = file_bytes.decode('iso-8859-1')
+            
         df = pd.read_csv(io.StringIO(content), sep=';')
         if len(df.columns) < 2:
             df = pd.read_csv(io.StringIO(content), sep=',')
@@ -606,7 +612,7 @@ elif st.session_state['logged_in_user'] is None:
                 Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben.
                 
                 **Sicherheit:**
-                Die Daten werden sicher und verschlüsselt gespeichert. Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten.
+                Die Daten werden sicher und verschlüsselt auf europäischen Servern gespeichert. Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten.
                 """)
             
             dsgvo = st.checkbox("Ich habe die Datenschutzhinweise gelesen und stimme der Verarbeitung meiner Daten zu.")
