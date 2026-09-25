@@ -6,3 +6,4 @@ dnspython
 icalendar
 streamlit-calendar
 supabase
+psycopg2-binary
