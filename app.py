@@ -105,8 +105,11 @@ inject_custom_css()
 def get_database_engine():
     try:
         db_url = st.secrets["DB_URL"].replace("6543", "5432")
+        
         if db_url.startswith("postgres://"):
-            db_url = db_url.replace("postgres://", "postgresql://")
+            db_url = db_url.replace("postgres://", "postgresql+psycopg2://")
+        elif db_url.startswith("postgresql://") and not db_url.startswith("postgresql+psycopg2://"):
+            db_url = db_url.replace("postgresql://", "postgresql+psycopg2://")
             
         return create_engine(
             db_url, 
@@ -831,7 +834,6 @@ else:
                     found_open = False
                     
                     for tsk in sorted_tasks:
-                        # Auswärtsfahrten überspringen (wurden schon in der roten Box oben gezeigt)
                         kategorie = str(tsk.get('kategorie', '')).lower()
                         if 'fahr' in kategorie or 'auto' in kategorie:
                             if pd.notna(tsk.get('event_id')) and 'bocholt' not in tsk.get('ort', ''):
@@ -839,7 +841,6 @@ else:
                                 
                         teams_str = str(tsk.get('betroffene_teams', ''))
                         
-                        # Tab-spezifische Filter Logik
                         if tab_name != "Alle":
                             if pd.isna(teams_str) or not teams_str.strip() or tab_name not in [t.strip() for t in teams_str.split(',')]:
                                 continue
