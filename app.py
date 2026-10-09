@@ -31,13 +31,15 @@ PW_ITERATIONS = 600_000
 ALLOWED_SELF_ROLES = ["Spieler", "Elternteil"]  # diese Rollen darf man bei der Registrierung selbst wählen
 VERGEBBARE_ROLLEN = ["Spieler", "Elternteil", "Trainer", "Organisator", "Admin"]  # nur durch einen Admin vergebbar
 MIN_PW_LENGTH = 8
+MAX_LOGIN_FAILS = 5        # Fehlversuche pro E-Mail ...
+LOGIN_LOCK_MINUTES = 15    # ... innerhalb dieses Zeitraums führen zur Sperre
 
 # ==========================================
 # 1. KONFIGURATION & DATENBANK-VERBINDUNG
 # ==========================================
 st.set_page_config(page_title="TuB Helfer-Orga", page_icon="🏐", layout="wide", initial_sidebar_state="auto")
 
-APP_VERSION = "4.6 (Kacheln Übersicht)"
+APP_VERSION = "4.7 (Sicherheit & Datenschutz)"
 BRAND = "#82368c"        # Vereinslila (aus tub-bocholt.de)
 BRAND_DARK = "#5e2766"
 SCHIRI_COLOR = "#c2410c"  # Orange für Schiedsgericht-Termine
@@ -143,6 +145,47 @@ def render_capacity(cur, mx, names=None):
     if names:
         st.caption("Eingetragen: " + ", ".join(names))
 
+# ---- Datenschutzerklärung der App ----
+# Stellen mit [BITTE ERGÄNZEN] mit dem Vorstand bzw. Datenschutzbeauftragten klären und ausfüllen.
+DATENSCHUTZ_TEXT = """
+**1. Verantwortlicher**
+TuB Bocholt 1907 e.V., Lowicker Str. 19c, 46395 Bocholt, vertreten durch [BITTE ERGÄNZEN: vertretungsberechtigter Vorstand].
+Kontakt für diese App: [BITTE ERGÄNZEN: E-Mail der Abteilung Volleyball].
+Datenschutzbeauftragte(r) des Vereins: [BITTE ERGÄNZEN oder Absatz streichen, falls keiner benannt ist].
+
+**2. Welche Daten wir verarbeiten**
+- Name, E-Mail-Adresse, Passwort (nur als verschlüsselter Prüfwert), Rolle und Teamzugehörigkeit
+- bei Kindern: Name und Team, angelegt durch ein Elternteil
+- Rückmeldungen zu Spieltagen (dabei/abgesagt) und übernommene Helferaufgaben inkl. Helferpunkten
+- Zeitpunkt deiner Einwilligung sowie fehlgeschlagene Anmeldeversuche (E-Mail und Zeitpunkt, zum Schutz vor Passwort-Raten)
+
+**3. Zweck und Rechtsgrundlage**
+Die Daten dienen ausschließlich der Organisation von Spieltagen, Fahrten und Helferaufgaben der Volleyballabteilung.
+Rechtsgrundlage ist deine Einwilligung (Art. 6 Abs. 1 lit. a DSGVO) sowie die Durchführung der Vereinsmitgliedschaft (Art. 6 Abs. 1 lit. b DSGVO).
+Die Speicherung der Anmeldeversuche erfolgt aufgrund unseres berechtigten Interesses an der Sicherheit der App (Art. 6 Abs. 1 lit. f DSGVO).
+
+**4. Wer die Daten sehen kann**
+Deine Angaben sehen Trainer, Organisatoren und Administratoren der Abteilung. Mitglieder deines Teams sehen, wer für eine Aufgabe eingetragen ist und wer zu einem Spieltag zu- oder abgesagt hat.
+Eine Weitergabe an Dritte zu Werbezwecken findet nicht statt.
+
+**5. Dienstleister (Auftragsverarbeiter)**
+- Datenbank: Supabase Inc., Speicherort der Daten: EU (Irland). Mit Supabase besteht ein Auftragsverarbeitungsvertrag [BITTE PRÜFEN].
+- Hosting der App: [BITTE ERGÄNZEN, z. B. Streamlit Community Cloud, Snowflake Inc., USA – Übermittlung auf Grundlage des EU-US Data Privacy Framework bzw. Standardvertragsklauseln].
+
+**6. Cookie**
+Wenn du „Angemeldet bleiben“ wählst, speichern wir ein Cookie („tub_session“) mit einer zufälligen Kennung für bis zu 30 Tage. Es ist für diese Funktion technisch notwendig und wird beim Ausloggen gelöscht. Weitere Cookies für Werbung oder Analyse setzen wir nicht.
+
+**7. Speicherdauer**
+Deine Daten werden gespeichert, solange du die App nutzt bzw. Mitglied der Abteilung bist, und danach gelöscht. [BITTE ERGÄNZEN: konkrete Frist, z. B. „spätestens 6 Monate nach Austritt“.]
+Fehlgeschlagene Anmeldeversuche werden nach 24 Stunden gelöscht.
+
+**8. Deine Rechte**
+Du hast das Recht auf Auskunft, Berichtigung, Löschung, Einschränkung der Verarbeitung, Datenübertragbarkeit und Widerspruch. Eine erteilte Einwilligung kannst du jederzeit mit Wirkung für die Zukunft widerrufen – eine kurze Nachricht an die oben genannte Kontaktadresse genügt.
+Du kannst dich außerdem bei einer Datenschutz-Aufsichtsbehörde beschweren, z. B. bei der Landesbeauftragten für Datenschutz und Informationsfreiheit Nordrhein-Westfalen (LDI NRW).
+
+*Stand: [BITTE ERGÄNZEN: Datum]*
+"""
+
 def render_footer():
     st.write("")
     st.divider()
@@ -164,13 +207,7 @@ def render_footer():
             """)
     with c2:
         with st.expander("Datenschutz"):
-            st.markdown("""
-            **Zweck der Datenspeicherung:**
-            Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben.
-
-            **Sicherheit:**
-            Die Daten werden sicher und verschlüsselt gespeichert. Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten.
-            """)
+            st.markdown(DATENSCHUTZ_TEXT)
     with c3:
         st.caption(f"App-Version {APP_VERSION}")
 
@@ -285,6 +322,15 @@ def update_db_schema(_engine):
         """))
 
         conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                attempt_id SERIAL PRIMARY KEY,
+                email TEXT NOT NULL,
+                attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_login_attempts_email ON login_attempts (email, attempted_at);"))
+
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS event_attendance (
                 event_id INTEGER REFERENCES events(event_id) ON DELETE CASCADE,
                 user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
@@ -299,8 +345,36 @@ def update_db_schema(_engine):
         
     return True
 
+APP_TABLES = ["users", "teams", "events", "tasks", "parent_child", "task_assignments",
+              "event_attendance", "login_sessions", "login_attempts"]
+
+@st.cache_resource
+def enable_row_level_security(_engine):
+    """Schaltet Row Level Security für alle App-Tabellen ein.
+    Ohne Policies kommt über die öffentliche Supabase-API (anon-Key) dann nichts mehr heraus.
+    Die App selbst verbindet sich als Tabellen-Eigentümer und ist davon nicht betroffen."""
+    for t in APP_TABLES:
+        try:
+            with _engine.begin() as conn:  # eigene Transaktion je Tabelle
+                conn.execute(text(f'ALTER TABLE public."{t}" ENABLE ROW LEVEL SECURITY;'))
+        except Exception:
+            pass
+    return True
+
+def get_rls_status():
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(text("""
+                SELECT tablename AS tabelle, rowsecurity AS rls_aktiv
+                FROM pg_tables WHERE schemaname = 'public' AND tablename = ANY(:t)
+                ORDER BY tablename
+            """), conn, params={"t": APP_TABLES})
+    except Exception:
+        return pd.DataFrame()
+
 try:
     update_db_schema(engine)
+    enable_row_level_security(engine)
 except Exception as e:
     st.error(f"Fehler bei der Tabellen-Initialisierung: {e}")
     st.stop()
@@ -336,6 +410,11 @@ def reset_password(user_id, new_password):
             conn.execute(text("UPDATE users SET password_hash = :h WHERE user_id = :u"), {"h": hashed, "u": user_id})
         clear_caches()
         delete_user_sessions(user_id)  # nach Passwortwechsel überall abmelden
+        try:
+            with engine.begin() as conn:  # evtl. Login-Sperre aufheben
+                conn.execute(text("DELETE FROM login_attempts WHERE email = (SELECT LOWER(email) FROM users WHERE user_id = :u)"), {"u": user_id})
+        except Exception:
+            pass
         return True, "Passwort erfolgreich geändert!"
     except Exception as e: 
         return False, str(e)
@@ -472,6 +551,33 @@ def authenticate(email, password):
         return user_data
     return None
 
+def login_locked(email):
+    """True, wenn für diese E-Mail zu viele Fehlversuche im Sperrzeitraum vorliegen."""
+    try:
+        with engine.connect() as conn:
+            n = conn.execute(text("""
+                SELECT COUNT(*) FROM login_attempts
+                WHERE email = :e AND attempted_at > NOW() - make_interval(mins => :m)
+            """), {"e": email, "m": LOGIN_LOCK_MINUTES}).scalar()
+        return int(n or 0) >= MAX_LOGIN_FAILS
+    except Exception:
+        return False
+
+def record_failed_login(email):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM login_attempts WHERE attempted_at < NOW() - INTERVAL '24 hours'"))
+            conn.execute(text("INSERT INTO login_attempts (email) VALUES (:e)"), {"e": email})
+    except Exception:
+        pass
+
+def clear_failed_logins(email):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM login_attempts WHERE email = :e"), {"e": email})
+    except Exception:
+        pass
+
 def set_user_role(user_id, rolle):
     if rolle not in VERGEBBARE_ROLLEN:
         return False, "Ungültige Rolle."
@@ -490,12 +596,21 @@ def add_child(parent_id, child_name, child_team_list):
     team_str = ", ".join(child_team_list) if child_team_list else "Kein Team"
     try:
         with engine.begin() as conn:
-            res = conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, parent_id, team) VALUES (:n, :e, :h, 'Kind', 1, :p, :t) RETURNING user_id"),
+            res = conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, dsgvo_zeitpunkt, parent_id, team) VALUES (:n, :e, :h, 'Kind', 1, NOW(), :p, :t) RETURNING user_id"),
                 {"n": child_name, "e": dummy_email, "h": dummy_pass, "p": parent_id, "t": team_str})
             conn.execute(text("INSERT INTO parent_child (parent_id, child_id) VALUES (:p, :c) ON CONFLICT DO NOTHING"), {"p": parent_id, "c": res.scalar()})
         clear_caches()
         return True, f"{child_name} erfolgreich hinzugefügt!"
     except Exception as e: return False, str(e)
+
+def confirm_child_consent(child_id):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE users SET dsgvo_akzeptiert = 1, dsgvo_zeitpunkt = NOW() WHERE user_id = :c AND rolle = 'Kind'"), {"c": child_id})
+        clear_caches()
+        return True
+    except Exception:
+        return False
 
 def link_existing_child(parent_id, child_id):
     try:
@@ -509,7 +624,7 @@ def link_existing_child(parent_id, child_id):
 def get_children(parent_id):
     try:
         with engine.connect() as conn:
-            return pd.read_sql(text("SELECT DISTINCT u.user_id, u.name, u.team FROM users u LEFT JOIN parent_child pc ON u.user_id = pc.child_id WHERE u.parent_id = :p OR pc.parent_id = :p"), conn, params={"p": parent_id})
+            return pd.read_sql(text("SELECT DISTINCT u.user_id, u.name, u.team, u.dsgvo_zeitpunkt FROM users u LEFT JOIN parent_child pc ON u.user_id = pc.child_id WHERE u.parent_id = :p OR pc.parent_id = :p"), conn, params={"p": parent_id})
     except: return pd.DataFrame()
 
 @st.cache_data(ttl=60)
@@ -899,7 +1014,18 @@ elif st.session_state['logged_in_user'] is None:
                                    help="Auf fremden oder gemeinsam genutzten Geräten bitte abwählen.")
             login_submitted = st.form_submit_button("Einloggen")
         if login_submitted:
-            logged_user = authenticate(login_email, login_pw)
+            email_key = (login_email or "").strip().lower()
+            if email_key and login_locked(email_key):
+                st.error(f"Zu viele fehlgeschlagene Versuche. Bitte warte {LOGIN_LOCK_MINUTES} Minuten "
+                         "oder lass dir von einem Trainer ein neues Passwort geben.")
+                logged_user = None
+                login_submitted = False
+            else:
+                logged_user = authenticate(login_email, login_pw)
+                if email_key:
+                    if logged_user: clear_failed_logins(email_key)
+                    else: record_failed_login(email_key)
+        if login_submitted:
             if logged_user:
                 st.session_state['logged_in_user'] = logged_user
                 st.session_state['logged_out'] = False
@@ -928,13 +1054,7 @@ elif st.session_state['logged_in_user'] is None:
             
             st.markdown("---")
             with st.expander("🛡️ Datenschutzhinweise anzeigen"):
-                st.markdown("""
-                **Zweck der Datenspeicherung:**
-                Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben.
-                
-                **Sicherheit:**
-                Die Daten werden sicher und verschlüsselt gespeichert. Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten.
-                """)
+                st.markdown(DATENSCHUTZ_TEXT)
             
             dsgvo = st.checkbox("Ich habe die Datenschutzhinweise gelesen und stimme der Verarbeitung meiner Daten zu.")
             st.markdown("---")
@@ -1644,19 +1764,59 @@ else:
     # TAB 4: FAMILIE
     # ----------------------------------------------------
     def page_family():
+        EINWILLIGUNG_KIND = ("Ich bin für dieses Kind sorgeberechtigt und willige in die Verarbeitung seiner Daten "
+                             "(Name, Team, Teilnahme und Aufgaben) gemäß den Datenschutzhinweisen ein.")
+
+        section_title("Meine Kinder")
+        if children_df.empty:
+            st.caption("Noch keine Kinder verknüpft.")
+        else:
+            for _, ch in children_df.iterrows():
+                with st.container(border=True):
+                    st.markdown(f"**{html.escape(str(ch['name']))}** &nbsp;<span class=\"tub-badge grey\">{html.escape(str(ch['team']))}</span>",
+                                unsafe_allow_html=True)
+                    if 'dsgvo_zeitpunkt' in ch and pd.isna(ch['dsgvo_zeitpunkt']):
+                        st.warning("Für dieses Kind liegt noch keine bestätigte Einwilligung vor.")
+                        if st.checkbox(EINWILLIGUNG_KIND, key=f"consent_{ch['user_id']}"):
+                            if st.button("Einwilligung bestätigen", key=f"consent_btn_{ch['user_id']}"):
+                                confirm_child_consent(ch['user_id']); st.rerun()
+
+        section_title("Kind anlegen")
         with st.form("add_c"):
             c1, c2 = st.columns(2)
             with c1: cn = st.text_input("Name Kind")
             with c2: ct = st.multiselect("Teams", TEAM_LISTE)
-            if st.form_submit_button("Kind anlegen") and cn:
-                add_child(user['user_id'], cn, ct); st.rerun()
-                
-        with st.form("link_c"):
+            with st.expander("🛡️ Datenschutzhinweise anzeigen"):
+                st.markdown(DATENSCHUTZ_TEXT)
+            consent = st.checkbox(EINWILLIGUNG_KIND)
+            if st.form_submit_button("Kind anlegen"):
+                if not cn.strip():
+                    st.warning("Bitte einen Namen eingeben.")
+                elif not consent:
+                    st.warning("Bitte bestätige die Einwilligung, um das Kind anzulegen.")
+                else:
+                    add_child(user['user_id'], cn.strip(), ct); st.rerun()
+
+        section_title("Kind mit Elternteil verknüpfen")
+        if user['rolle'] in ['Admin', 'Organisator']:
+            # Nur Orga darf verknüpfen – sonst könnte jedes Elternteil fremde Kinder an sich binden
             all_k = get_all_children_in_db()
-            if not all_k.empty:
-                opts = {r['user_id']: f"{r['name']} ({r['team']})" for _, r in all_k.iterrows()}
-                sk = st.selectbox("Bestehendes Kind verknüpfen", list(opts.keys()), format_func=lambda x: opts[x])
-                if st.form_submit_button("Verknüpfen"): link_existing_child(user['user_id'], sk); st.rerun()
+            erwachsene = all_users_df[all_users_df['rolle'] != 'Kind'] if not all_users_df.empty else pd.DataFrame()
+            if all_k.empty or erwachsene.empty:
+                st.caption("Keine Kinder oder Elternteile vorhanden.")
+            else:
+                with st.form("link_c"):
+                    p_opts = {r['user_id']: f"{r['name']} ({r['rolle']})" for _, r in erwachsene.iterrows()}
+                    k_opts = {r['user_id']: f"{r['name']} ({r['team']})" for _, r in all_k.iterrows()}
+                    sp = st.selectbox("Elternteil", list(p_opts.keys()), format_func=lambda x: p_opts[x])
+                    sk = st.selectbox("Kind", list(k_opts.keys()), format_func=lambda x: k_opts[x])
+                    if st.form_submit_button("Verknüpfen"):
+                        ok, msg = link_existing_child(sp, sk)
+                        if ok: st.success(msg)
+                        else: st.error(msg)
+        else:
+            st.caption("Ist dein Kind schon von einem anderen Elternteil angelegt worden? "
+                       "Dann bitte die Orga, euch zu verknüpfen – so sieht niemand fremde Kinder.")
 
     # ----------------------------------------------------
     # TAB 5: PUNKTE & AUSWERTUNG (Trainer, Organisatoren, Admin)
@@ -1688,6 +1848,18 @@ else:
     # TAB 6: ADMIN
     # ----------------------------------------------------
     def page_admin():
+        with st.expander("🔒 Datenbank-Sicherheit (Row Level Security)"):
+            rls = get_rls_status()
+            if rls.empty:
+                st.info("Status konnte nicht gelesen werden.")
+            else:
+                aus = rls[~rls['rls_aktiv'].astype(bool)]
+                if aus.empty:
+                    st.success("RLS ist für alle App-Tabellen aktiv. Über die öffentliche Supabase-Schnittstelle sind keine Daten abrufbar.")
+                else:
+                    st.error("RLS ist für folgende Tabellen noch AUS: " + ", ".join(aus['tabelle']) +
+                             ". Bitte im Supabase-Dashboard aktivieren oder die App neu starten.")
+                st.dataframe(rls, hide_index=True, use_container_width=True)
         st.subheader("🚨 Spielplan zurücksetzen (Massen-Löschen)")
         st.write("Lösche alle Termine eines Teams, bevor du einen aktualisierten Spielplan hochlädst, um doppelte Einträge zu vermeiden.")
         with st.form("delete_team_events"):
@@ -1783,8 +1955,7 @@ else:
         st.Page(page_events, title="Spieltage", icon=":material/sports_volleyball:", url_path="spieltage"),
         st.Page(page_tasks, title="Freie Aufgaben", icon=":material/task_alt:", url_path="aufgaben"),
     ]
-    if user['rolle'] != 'Elternteil':
-        pages.append(st.Page(page_calendar, title="Kalender", icon=":material/calendar_month:", url_path="kalender"))
+    pages.append(st.Page(page_calendar, title="Kalender", icon=":material/calendar_month:", url_path="kalender"))
     pages.append(st.Page(page_family, title="Familie", icon=":material/family_restroom:", url_path="familie"))
     if user['rolle'] in ['Admin', 'Organisator', 'Trainer']:
         pages.append(st.Page(page_stats, title="Punkte & Auswertung", icon=":material/leaderboard:", url_path="punkte"))
