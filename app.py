@@ -9,6 +9,7 @@ import io
 import re
 import os
 import html
+import streamlit.components.v1 as components
 from sqlalchemy import create_engine, text
 
 try:
@@ -36,7 +37,7 @@ MIN_PW_LENGTH = 8
 # ==========================================
 st.set_page_config(page_title="TuB Helfer-Orga", page_icon="🏐", layout="wide", initial_sidebar_state="auto")
 
-APP_VERSION = "4.4 (Datumsformate)"
+APP_VERSION = "4.5 (Angemeldet bleiben)"
 BRAND = "#82368c"        # Vereinslila (aus tub-bocholt.de)
 BRAND_DARK = "#5e2766"
 SCHIRI_COLOR = "#c2410c"  # Orange für Schiedsgericht-Termine
@@ -265,6 +266,14 @@ def update_db_schema(_engine):
         """))
 
         conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS login_sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                expires_at TIMESTAMPTZ NOT NULL
+            );
+        """))
+
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS event_attendance (
                 event_id INTEGER REFERENCES events(event_id) ON DELETE CASCADE,
                 user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
@@ -315,9 +324,73 @@ def reset_password(user_id, new_password):
         with engine.begin() as conn:
             conn.execute(text("UPDATE users SET password_hash = :h WHERE user_id = :u"), {"h": hashed, "u": user_id})
         clear_caches()
+        delete_user_sessions(user_id)  # nach Passwortwechsel überall abmelden
         return True, "Passwort erfolgreich geändert!"
     except Exception as e: 
         return False, str(e)
+
+# ---- "Angemeldet bleiben": zufälliges Token im Browser-Cookie, nur dessen Hash in der Datenbank ----
+SESSION_COOKIE = "tub_session"
+SESSION_DAYS = 30
+
+def _hash_token(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+def create_login_session(user_id):
+    token = secrets.token_urlsafe(32)
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM login_sessions WHERE expires_at < NOW()"))
+        conn.execute(text("""
+            INSERT INTO login_sessions (token_hash, user_id, expires_at)
+            VALUES (:h, :u, NOW() + make_interval(days => :d))
+        """), {"h": _hash_token(token), "u": user_id, "d": SESSION_DAYS})
+    return token
+
+def user_from_session_token(token):
+    if not token or len(token) > 200:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT u.* FROM login_sessions s JOIN users u ON u.user_id = s.user_id
+                WHERE s.token_hash = :h AND s.expires_at > NOW() AND u.rolle != 'Kind'
+            """), {"h": _hash_token(token)}).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    user_data = dict(row._mapping)
+    user_data.pop("password_hash", None)
+    return user_data
+
+def delete_login_session(token):
+    if not token:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM login_sessions WHERE token_hash = :h"), {"h": _hash_token(token)})
+    except Exception:
+        pass
+
+def delete_user_sessions(user_id):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM login_sessions WHERE user_id = :u"), {"u": user_id})
+    except Exception:
+        pass
+
+def _write_cookie(value, max_age):
+    # Setzt das Cookie im Browser (Streamlit kann Cookies nur lesen, nicht schreiben)
+    components.html(f"""<script>
+        const secure = window.parent.location.protocol === "https:" ? "; Secure" : "";
+        window.parent.document.cookie = "{SESSION_COOKIE}={value}; Max-Age={max_age}; Path=/; SameSite=Lax" + secure;
+    </script>""", height=0)
+
+def read_session_cookie():
+    try:
+        return st.context.cookies.get(SESSION_COOKIE)
+    except Exception:
+        return None
 
 def clear_caches():
     st.cache_data.clear()
@@ -437,6 +510,7 @@ def get_all_children_in_db():
 def delete_user(user_id):
     try:
         with engine.begin() as conn:
+            conn.execute(text("DELETE FROM login_sessions WHERE user_id = :id"), {"id": user_id})
             conn.execute(text("DELETE FROM parent_child WHERE parent_id = :id OR child_id = :id"), {"id": user_id})
             conn.execute(text("UPDATE users SET parent_id = NULL WHERE parent_id = :id"), {"id": user_id})
             conn.execute(text("DELETE FROM task_assignments WHERE user_id = :id"), {"id": user_id})
@@ -774,6 +848,21 @@ KATEGORIE_OPTIONEN = ["Catering", "Fahrdienst", "Aufbau/Abbau", "Schiedsgericht"
 if 'logged_in_user' not in st.session_state:
     st.session_state['logged_in_user'] = None
 
+# Nach einem Reload: Anmeldung aus dem Cookie wiederherstellen (nicht direkt nach dem Ausloggen)
+if st.session_state['logged_in_user'] is None and not st.session_state.get('logged_out'):
+    _token = read_session_cookie()
+    if _token:
+        _restored = user_from_session_token(_token)
+        if _restored:
+            st.session_state['logged_in_user'] = _restored
+            st.session_state['session_token'] = _token
+
+# Cookie-Aktionen aus dem vorherigen Durchlauf (Login/Logout) im Browser ausführen
+if st.session_state.get('pending_cookie'):
+    _write_cookie(st.session_state.pop('pending_cookie'), SESSION_DAYS * 24 * 3600)
+if st.session_state.pop('clear_cookie', False):
+    _write_cookie("", 0)
+
 # Datenbankfehler sichtbar machen, statt fälschlich das Admin-Setup anzuzeigen
 try:
     user_count = get_user_count()
@@ -795,11 +884,21 @@ elif st.session_state['logged_in_user'] is None:
         with st.form("login"):
             login_email = st.text_input("E-Mail")
             login_pw = st.text_input("Passwort", type="password")
+            remember = st.checkbox(f"Angemeldet bleiben ({SESSION_DAYS} Tage)", value=True,
+                                   help="Auf fremden oder gemeinsam genutzten Geräten bitte abwählen.")
             login_submitted = st.form_submit_button("Einloggen")
         if login_submitted:
             logged_user = authenticate(login_email, login_pw)
             if logged_user:
                 st.session_state['logged_in_user'] = logged_user
+                st.session_state['logged_out'] = False
+                if remember:
+                    try:
+                        token = create_login_session(logged_user['user_id'])
+                        st.session_state['session_token'] = token
+                        st.session_state['pending_cookie'] = token
+                    except Exception:
+                        pass  # Login klappt trotzdem, nur ohne "angemeldet bleiben"
                 st.rerun()
             else: 
                 st.error("Zugangsdaten ungültig.")
@@ -1683,7 +1782,10 @@ else:
         """, unsafe_allow_html=True)
         st.write("")
         if st.button("Ausloggen", icon=":material/logout:", use_container_width=True):
+            delete_login_session(st.session_state.pop('session_token', None) or read_session_cookie())
             st.session_state['logged_in_user'] = None
+            st.session_state['logged_out'] = True
+            st.session_state['clear_cookie'] = True
             st.rerun()
 
     nav.run()
