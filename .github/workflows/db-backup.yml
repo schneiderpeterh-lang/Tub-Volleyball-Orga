@@ -16,23 +16,51 @@ jobs:
   backup:
     runs-on: ubuntu-latest
     steps:
-      - name: PostgreSQL-Client installieren (Version 17)
+      - name: 1 - Zugangsdaten pruefen
+        env:
+          DB_URL: ${{ secrets.BACKUP_DB_URL }}
+          BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-common
-          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          sudo apt-get install -y -qq postgresql-client-17
+          python3 - <<'PY'
+          import os, sys
+          from urllib.parse import urlsplit
+          url = os.environ.get("DB_URL", "").strip()
+          fehler = []
+          if not url:
+              fehler.append("Secret BACKUP_DB_URL fehlt oder ist leer.")
+          if not os.environ.get("BACKUP_PASSWORD", "").strip():
+              fehler.append("Secret BACKUP_PASSWORD fehlt oder ist leer.")
+          if url:
+              if "[YOUR-PASSWORD]" in url:
+                  fehler.append("In BACKUP_DB_URL steht noch [YOUR-PASSWORD] - bitte durch das echte Datenbank-Passwort ersetzen.")
+              if not url.startswith(("postgresql://", "postgres://")):
+                  fehler.append("BACKUP_DB_URL muss mit postgresql:// beginnen (keine Variante mit +psycopg2).")
+              try:
+                  u = urlsplit(url)
+                  host, port, user = u.hostname, u.port, u.username
+                  print(f"Host: {host}  Port: {port}  Benutzer: {user}")   # Passwort wird NICHT ausgegeben
+                  if port != 5432:
+                      fehler.append(f"Port ist {port}, erwartet wird 5432 (Session pooler).")
+                  if host and not host.endswith("pooler.supabase.com"):
+                      print("Hinweis: Host ist kein Supabase-Pooler. Die 'Direct connection' ist von GitHub aus oft nicht erreichbar.")
+              except ValueError:
+                  fehler.append("Die URL ist nicht lesbar - meist enthaelt das Passwort Sonderzeichen wie @ # / ? : "
+                                "Diese muessen kodiert werden (z. B. @ -> %40, # -> %23) oder ein Passwort ohne Sonderzeichen verwenden.")
+          if fehler:
+              print("\n".join("FEHLER: " + f for f in fehler))
+              sys.exit(1)
+          print("Zugangsdaten sehen gut aus.")
+          PY
 
-      - name: Datenbank exportieren
+      - name: 2 - Datenbank exportieren
         env:
           DB_URL: ${{ secrets.BACKUP_DB_URL }}
         run: |
-          /usr/lib/postgresql/17/bin/pg_dump "$DB_URL" \
-            --schema=public --no-owner --no-privileges \
-            --format=custom --file=backup.dump
+          docker run --rm -e DB_URL -v "$PWD:/out" postgres:17 \
+            sh -c 'pg_dump "$DB_URL" --schema=public --no-owner --no-privileges --format=custom --file=/out/backup.dump'
           ls -lh backup.dump
 
-      - name: Backup verschlüsseln
+      - name: 3 - Backup verschluesseln
         env:
           BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
         run: |
@@ -44,7 +72,7 @@ jobs:
           rm backup.dump
           echo "BACKUP_FILE=$FILE" >> "$GITHUB_ENV"
 
-      - name: Backup ablegen (90 Tage)
+      - name: 4 - Backup ablegen (90 Tage)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BACKUP_FILE }}
