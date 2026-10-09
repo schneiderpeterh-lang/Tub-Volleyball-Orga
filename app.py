@@ -36,7 +36,7 @@ MIN_PW_LENGTH = 8
 # ==========================================
 st.set_page_config(page_title="TuB Helfer-Orga", page_icon="🏐", layout="wide", initial_sidebar_state="auto")
 
-APP_VERSION = "4.3 (SAMS-Import nur TuB)"
+APP_VERSION = "4.4 (Datumsformate)"
 BRAND = "#82368c"        # Vereinslila (aus tub-bocholt.de)
 BRAND_DARK = "#5e2766"
 SCHIRI_COLOR = "#c2410c"  # Orange für Schiedsgericht-Termine
@@ -452,6 +452,43 @@ def delete_user(user_id):
 # ==========================================
 # 4. EVENTS, AUFGABEN & CSV IMPORT SQL
 # ==========================================
+# ---- Datum robust lesen: "12.10.2026 14:00", "Sa, 12.10.2026 14:00", "12.10.26", "2026-10-12 14:00" ----
+_DATUM_RE = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})")
+_ISO_RE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
+_ZEIT_RE = re.compile(r"(\d{1,2}):(\d{2})")
+
+def parse_datum(value):
+    """Gibt einen pd.Timestamp zurück oder None, wenn kein Datum erkennbar ist."""
+    if value is None:
+        return None
+    if isinstance(value, (pd.Timestamp, datetime.datetime)):
+        return None if pd.isna(value) else pd.Timestamp(value)
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s_ = str(value)
+    m = _DATUM_RE.search(s_)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if y < 100:
+            y += 2000
+    else:
+        m = _ISO_RE.search(s_)
+        if not m:
+            return None
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    t = _ZEIT_RE.search(s_[m.end():])
+    hh, mm = (int(t.group(1)), int(t.group(2))) if t else (0, 0)
+    try:
+        return pd.Timestamp(year=y, month=mo, day=d, hour=hh, minute=mm)
+    except ValueError:
+        return None
+
+def parse_datum_series(series):
+    return pd.to_datetime(series.apply(parse_datum), errors="coerce")
+
 # Erkennt TuB-Bocholt-Mannschaften ("TuB Bocholt", "TuB Bocholt 2", "TuB 1907 Bocholt" ...),
 # aber NICHT andere Bocholter Vereine. Bei Bedarf hier anpassen.
 TUB_MUSTER = re.compile(r"\btub\b.*\bbocholt\b|\bbocholt\b.*\btub\b", re.IGNORECASE)
@@ -510,7 +547,9 @@ def read_sams_csv(file_bytes):
         zeilen.append({
             "Datum": datum, "Uhrzeit": zeit, "Spiel": f"{m1} vs. {m2}",
             "Rolle": rolle, "Ort": _clean(row[c_ort]) if c_ort else "",
-            "_start": f"{datum} {zeit}".strip(), "_schiri": pfeift,
+            "_start": (parse_datum(f"{datum} {zeit}").strftime("%d.%m.%Y %H:%M")
+                       if parse_datum(f"{datum} {zeit}") is not None else f"{datum} {zeit}".strip()),
+            "_schiri": pfeift,
         })
     info = f"{len(zeilen)} von {len(df)} Spielen betreffen TuB Bocholt (als Mannschaft oder Schiedsgericht)."
     return pd.DataFrame(zeilen), info
@@ -845,13 +884,8 @@ else:
 
         # AUFGABEN VORBEREITEN & SORTIEREN
         def parse_to_datetime(date_str):
-            if pd.isna(date_str) or not str(date_str).strip(): 
-                return datetime.datetime.max
-            try:
-                clean_str = str(date_str).replace(' Uhr', '').replace(',', '').strip()
-                return pd.to_datetime(clean_str, dayfirst=True)
-            except:
-                return datetime.datetime.max
+            ts = parse_datum(date_str)
+            return ts if ts is not None else pd.Timestamp.max
 
         sorted_tasks = []
         if not tasks_df.empty:
@@ -892,7 +926,7 @@ else:
         if not events_df.empty:
             _rel = events_df[events_df['betroffene_teams'].apply(is_relevant)].copy()
             if not _rel.empty:
-                _rel['dt'] = pd.to_datetime(_rel['start_zeit'].astype(str).str.replace(' Uhr', '').str.replace(',', ''), dayfirst=True, errors='coerce')
+                _rel['dt'] = parse_datum_series(_rel['start_zeit'])
                 _fut = _rel[_rel['dt'] >= pd.Timestamp.now()].sort_values('dt')
                 if not _fut.empty:
                     next_ev_value = _fut.iloc[0]['dt'].strftime('%d.%m. · %H:%M')
@@ -1193,7 +1227,7 @@ else:
                     team_events = rel_events[rel_events['betroffene_teams'].apply(is_selected_team)].copy()
                 
                     if not team_events.empty:
-                        team_events['sort_date'] = pd.to_datetime(team_events['start_zeit'].astype(str).str.replace(' Uhr', ''), dayfirst=True, errors='coerce')
+                        team_events['sort_date'] = parse_datum_series(team_events['start_zeit'])
                         now = pd.Timestamp(datetime.datetime.now())
                         future_events = team_events[team_events['sort_date'] >= now].sort_values('sort_date')
                         past_events = team_events[team_events['sort_date'] < now].sort_values('sort_date', ascending=False)
@@ -1307,18 +1341,17 @@ else:
                 return False
             return team_filter in [t.strip() for t in str(teams_str).split(',')]
 
-        def to_ts(date_str):
-            if date_str is None or pd.isna(date_str) or not str(date_str).strip():
-                return None
-            ts = pd.to_datetime(str(date_str).replace(' Uhr', '').replace(',', '').strip(), dayfirst=True, errors='coerce')
-            return None if pd.isna(ts) else ts
+        to_ts = parse_datum
+        ohne_datum = []
 
         # ---- Einträge sammeln (Spieltage + freie Aufgaben) ----
         entries = []
         if not events_df.empty:
             for _, ev in events_df[events_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
                 ts = to_ts(ev['start_zeit'])
-                if ts is None: continue
+                if ts is None:
+                    ohne_datum.append(f"{ev['titel']} ({ev['start_zeit']})")
+                    continue
                 # Gehört zu diesem Spiel eine Schiedsgericht-Aufgabe (z. B. aus dem SAMS-Import)?
                 schiri = tasks_df[(tasks_df['event_id'] == ev['event_id']) &
                                   tasks_df['kategorie'].astype(str).str.lower().str.contains('schiedsgericht')] if not tasks_df.empty else pd.DataFrame()
@@ -1341,7 +1374,9 @@ else:
         if not tasks_df.empty:
             for _, tk in tasks_df[tasks_df['event_id'].isna() & tasks_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
                 ts = to_ts(tk.get('start_zeit'))
-                if ts is None: continue
+                if ts is None:
+                    ohne_datum.append(f"{tk['kategorie']} ({tk.get('start_zeit')})")
+                    continue
                 belegt = int((assign_df['task_id'] == tk['task_id']).sum()) if not assign_df.empty else 0
                 maximal = int(tk.get('max_helfer', 1) or 1)
                 ist_sr = 'schiedsgericht' in str(tk['kategorie']).lower()
@@ -1359,6 +1394,10 @@ else:
         elif art_filter == "Aufgaben":
             entries = [e for e in entries if e["art"] == "Aufgabe"]
         entries.sort(key=lambda e: e["ts"])
+
+        if ohne_datum:
+            st.warning(f"{len(ohne_datum)} Termin(e) können nicht angezeigt werden, weil das Datum nicht lesbar ist, "
+                       f"z. B.: {ohne_datum[0]}")
 
         if not entries:
             st.info("Keine Termine für diese Auswahl.")
