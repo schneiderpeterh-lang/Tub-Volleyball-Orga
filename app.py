@@ -35,9 +35,10 @@ MIN_PW_LENGTH = 8
 # ==========================================
 st.set_page_config(page_title="TuB Helfer-Orga", page_icon="🏐", layout="wide", initial_sidebar_state="auto")
 
-APP_VERSION = "4.1 (Kalender fürs Handy)"
+APP_VERSION = "4.2 (Schiedsgericht im Kalender)"
 BRAND = "#82368c"        # Vereinslila (aus tub-bocholt.de)
 BRAND_DARK = "#5e2766"
+SCHIRI_COLOR = "#c2410c"  # Orange für Schiedsgericht-Termine
 LOGO_PATH = "logo.png"   # optional: Vereinslogo als logo.png ins Repo legen
 
 def inject_custom_css():
@@ -1241,8 +1242,18 @@ else:
 
         team_filter = st.pills("Team", ["Meine Teams"] + TEAM_LISTE, default="Meine Teams",
                                key="cal_team", label_visibility="collapsed") or "Meine Teams"
-        view = st.segmented_control("Ansicht", ["Liste", "Monat"], default="Liste",
-                                    key="cal_view", label_visibility="collapsed") or "Liste"
+        c_art, c_view = st.columns([3, 2])
+        with c_art:
+            art_filter = st.segmented_control("Art", ["Alle", "Spiele", "Schiedsgericht", "Aufgaben"], default="Alle",
+                                              key="cal_art", label_visibility="collapsed") or "Alle"
+        with c_view:
+            view = st.segmented_control("Ansicht", ["Liste", "Monat"], default="Liste",
+                                        key="cal_view", label_visibility="collapsed") or "Liste"
+        st.markdown(
+            f'<div style="font-size:.8rem;color:#666;margin:-4px 0 6px 0">'
+            f'<span style="color:{BRAND}">●</span> Spiel &nbsp; '
+            f'<span style="color:{SCHIRI_COLOR}">●</span> Schiedsgericht &nbsp; '
+            f'<span style="color:#5f5f5f">●</span> Aufgabe</div>', unsafe_allow_html=True)
 
         def cal_is_relevant(teams_str):
             if team_filter == "Meine Teams":
@@ -1263,24 +1274,45 @@ else:
             for _, ev in events_df[events_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
                 ts = to_ts(ev['start_zeit'])
                 if ts is None: continue
-                entries.append({
+                # Gehört zu diesem Spiel eine Schiedsgericht-Aufgabe (z. B. aus dem SAMS-Import)?
+                schiri = tasks_df[(tasks_df['event_id'] == ev['event_id']) &
+                                  tasks_df['kategorie'].astype(str).str.lower().str.contains('schiedsgericht')] if not tasks_df.empty else pd.DataFrame()
+                spielt_selbst = 'bocholt' in str(ev['titel']).lower()
+                eintrag = {
                     "id": f"ev{ev['event_id']}", "ts": ts, "end": to_ts(ev.get('ende_zeit')),
                     "art": "Spieltag", "titel": str(ev['titel']),
                     "teams": str(ev['betroffene_teams'] or ""), "ort": str(ev.get('ort') or ""),
-                    "farbe": BRAND,
-                })
+                    "farbe": BRAND, "schiri": False,
+                }
+                if not schiri.empty:
+                    eintrag["schiri"] = True
+                    sr_ids = schiri['task_id'].tolist()
+                    eintrag["belegt"] = int(assign_df['task_id'].isin(sr_ids).sum()) if not assign_df.empty else 0
+                    eintrag["max"] = int(pd.to_numeric(schiri['max_helfer'], errors='coerce').fillna(1).sum())
+                    if not spielt_selbst:
+                        eintrag["art"] = "Schiedsgericht"
+                        eintrag["farbe"] = SCHIRI_COLOR
+                entries.append(eintrag)
         if not tasks_df.empty:
             for _, tk in tasks_df[tasks_df['event_id'].isna() & tasks_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
                 ts = to_ts(tk.get('start_zeit'))
                 if ts is None: continue
                 belegt = int((assign_df['task_id'] == tk['task_id']).sum()) if not assign_df.empty else 0
                 maximal = int(tk.get('max_helfer', 1) or 1)
+                ist_sr = 'schiedsgericht' in str(tk['kategorie']).lower()
                 entries.append({
                     "id": f"tk{tk['task_id']}", "ts": ts, "end": None,
-                    "art": "Aufgabe", "titel": str(tk['kategorie']),
+                    "art": "Schiedsgericht" if ist_sr else "Aufgabe", "titel": str(tk['kategorie']),
                     "teams": str(tk.get('betroffene_teams') or "Alle"), "ort": "",
-                    "farbe": "#5f5f5f", "belegt": belegt, "max": maximal,
+                    "farbe": SCHIRI_COLOR if ist_sr else "#5f5f5f", "belegt": belegt, "max": maximal,
+                    "schiri": ist_sr,
                 })
+        if art_filter == "Spiele":
+            entries = [e for e in entries if e["art"] == "Spieltag"]
+        elif art_filter == "Schiedsgericht":
+            entries = [e for e in entries if e.get("schiri")]
+        elif art_filter == "Aufgaben":
+            entries = [e for e in entries if e["art"] == "Aufgabe"]
         entries.sort(key=lambda e: e["ts"])
 
         if not entries:
@@ -1296,11 +1328,12 @@ else:
             zeit = e["ts"].strftime("%H:%M")
             zeit_txt = "" if zeit == "00:00" else f"{zeit} Uhr"
             details = " · ".join([x for x in [zeit_txt, esc(e["ort"])] if x])
-            if e["art"] == "Aufgabe":
+            status = ""
+            if e["art"] == "Spieltag" and e.get("schiri"):
+                status += '<span class="tub-badge sr">+ Schiedsgericht</span> '
+            if "max" in e:
                 frei = max(e["max"] - e["belegt"], 0)
-                status = f'<span class="tub-badge">{frei} frei</span>' if frei else '<span class="tub-badge grey">voll</span>'
-            else:
-                status = ""
+                status += f'<span class="tub-badge">{frei} frei</span>' if frei else '<span class="tub-badge grey">besetzt</span>' 
             return f"""
             <div class="cal-item" style="border-left-color:{e['farbe']}">
                 <div class="cal-date">
@@ -1326,6 +1359,7 @@ else:
         .cal-kind {{font-size:.75rem; color:#777;}}
         .cal-title {{font-weight:600; overflow-wrap:anywhere;}}
         .cal-meta {{font-size:.85rem; color:#555; overflow-wrap:anywhere;}}
+        .tub-badge.sr {{background: rgba(194, 65, 12, .12); color: {SCHIRI_COLOR};}}
         </style>"""
 
         def render_list(items):
@@ -1357,7 +1391,12 @@ else:
         # ---------------- MONAT (eher für den PC) ----------------
         cal_events = []
         for e in entries:
-            kurz = e["teams"] if e["art"] == "Spieltag" else e["titel"]
+            if e["art"] == "Spieltag":
+                kurz = e["teams"]
+            elif e["art"] == "Schiedsgericht":
+                kurz = f"SR {e['teams']}"
+            else:
+                kurz = e["titel"]
             cal_events.append({
                 "id": e["id"], "title": kurz,
                 "start": e["ts"].isoformat(),
