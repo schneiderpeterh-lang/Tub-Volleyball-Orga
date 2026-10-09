@@ -1,0 +1,52 @@
+# Wöchentliches, verschlüsseltes Backup der Supabase-Datenbank
+# Ablage im Repo unter:  .github/workflows/db-backup.yml
+#
+# Benötigte Repository-Secrets (Settings → Secrets and variables → Actions):
+#   BACKUP_DB_URL     Verbindungs-URL "Session pooler" aus Supabase (Port 5432)
+#   BACKUP_PASSWORD   langes Passwort zum Verschlüsseln der Backups (gut aufheben!)
+
+name: Datenbank-Backup
+
+on:
+  schedule:
+    - cron: "0 3 * * 1,4"   # Montag und Donnerstag, 03:00 UTC
+  workflow_dispatch:         # erlaubt manuelles Starten über "Run workflow"
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: PostgreSQL-Client installieren (Version 17)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -qq postgresql-client-17
+
+      - name: Datenbank exportieren
+        env:
+          DB_URL: ${{ secrets.BACKUP_DB_URL }}
+        run: |
+          /usr/lib/postgresql/17/bin/pg_dump "$DB_URL" \
+            --schema=public --no-owner --no-privileges \
+            --format=custom --file=backup.dump
+          ls -lh backup.dump
+
+      - name: Backup verschlüsseln
+        env:
+          BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
+        run: |
+          FILE="tub-orga-backup-$(date +%Y-%m-%d).dump.gpg"
+          gpg --batch --yes --pinentry-mode loopback \
+              --passphrase "$BACKUP_PASSWORD" \
+              --symmetric --cipher-algo AES256 \
+              --output "$FILE" backup.dump
+          rm backup.dump
+          echo "BACKUP_FILE=$FILE" >> "$GITHUB_ENV"
+
+      - name: Backup ablegen (90 Tage)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BACKUP_FILE }}
+          path: ${{ env.BACKUP_FILE }}
+          retention-days: 90
