@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import datetime
+from zoneinfo import ZoneInfo
 import hashlib
 import hmac
 import secrets
@@ -39,7 +40,7 @@ LOGIN_LOCK_MINUTES = 15    # ... innerhalb dieses Zeitraums führen zur Sperre
 # ==========================================
 st.set_page_config(page_title="TuB Helfer-Orga", page_icon="🏐", layout="wide", initial_sidebar_state="auto")
 
-APP_VERSION = "4.7 (Sicherheit & Datenschutz)"
+APP_VERSION = "4.8 (Kalender-Export)"
 BRAND = "#82368c"        # Vereinslila (aus tub-bocholt.de)
 BRAND_DARK = "#5e2766"
 SCHIRI_COLOR = "#c2410c"  # Orange für Schiedsgericht-Termine
@@ -688,6 +689,57 @@ def parse_datum(value):
 
 def parse_datum_series(series):
     return pd.to_datetime(series.apply(parse_datum), errors="coerce")
+
+# ---- Kalender-Export (.ics) – funktioniert mit Google, Apple, Outlook ----
+BERLIN = ZoneInfo("Europe/Berlin")
+ICS_DAUER_STUNDEN = 2  # Standarddauer, wenn kein Ende bekannt ist
+
+def _ics_text(v):
+    v = str(v or "")
+    return (v.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
+             .replace("\r\n", "\\n").replace("\n", "\\n"))
+
+def _ics_fold(line):
+    # Zeilen nach RFC 5545 auf max. 75 Bytes umbrechen
+    raw = line.encode("utf-8")
+    if len(raw) <= 75:
+        return line
+    parts, cur = [], b""
+    for ch in line:
+        b = ch.encode("utf-8")
+        if len(cur) + len(b) > (75 if not parts else 74):
+            parts.append(cur.decode("utf-8")); cur = b""
+        cur += b
+    parts.append(cur.decode("utf-8"))
+    return "\r\n ".join(parts)
+
+def _ics_utc(ts):
+    return ts.to_pydatetime().replace(tzinfo=BERLIN).astimezone(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+def build_ics(termine, kalendername="TuB Volleyball"):
+    """termine: Liste von dicts mit uid, ts, end (optional), titel, ort, beschreibung."""
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    zeilen = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//TuB Bocholt//Helfer-Orga//DE",
+              "CALSCALE:GREGORIAN", "METHOD:PUBLISH", f"X-WR-CALNAME:{_ics_text(kalendername)}"]
+    for t in termine:
+        ts = t["ts"]
+        zeilen += ["BEGIN:VEVENT", f"UID:{t['uid']}@tub-helfer-orga", f"DTSTAMP:{stamp}"]
+        if ts.hour == 0 and ts.minute == 0:   # ohne Uhrzeit -> ganztägig
+            zeilen += [f"DTSTART;VALUE=DATE:{ts.strftime('%Y%m%d')}",
+                       f"DTEND;VALUE=DATE:{(ts + pd.Timedelta(days=1)).strftime('%Y%m%d')}"]
+        else:
+            ende = t.get("end")
+            if ende is None or ende <= ts:
+                ende = ts + pd.Timedelta(hours=ICS_DAUER_STUNDEN)
+            zeilen += [f"DTSTART:{_ics_utc(ts)}", f"DTEND:{_ics_utc(ende)}"]
+        zeilen.append(f"SUMMARY:{_ics_text(t['titel'])}")
+        if t.get("ort"):
+            zeilen.append(f"LOCATION:{_ics_text(t['ort'])}")
+        if t.get("beschreibung"):
+            zeilen.append(f"DESCRIPTION:{_ics_text(t['beschreibung'])}")
+        zeilen.append("END:VEVENT")
+    zeilen.append("END:VCALENDAR")
+    return ("\r\n".join(_ics_fold(z) for z in zeilen) + "\r\n").encode("utf-8")
 
 # Erkennt TuB-Bocholt-Mannschaften ("TuB Bocholt", "TuB Bocholt 2", "TuB 1907 Bocholt" ...),
 # aber NICHT andere Bocholter Vereine. Bei Bedarf hier anpassen.
@@ -1641,6 +1693,61 @@ else:
         if not entries:
             st.info("Keine Termine für diese Auswahl.")
             return
+
+        # ---------------- Export in den eigenen Kalender ----------------
+        heute_export = pd.Timestamp.now().normalize()
+
+        def export_titel(e):
+            if e["art"] == "Spieltag":
+                t = f"🏐 {e['teams']}: {e['titel']}"
+                return t + " (+ Schiedsgericht)" if e.get("schiri") else t
+            if e["art"] == "Schiedsgericht":
+                return f"🧑‍⚖️ Schiedsgericht {e['teams']}: {e['titel']}"
+            return f"📋 {e['titel']} ({e['teams']})"
+
+        ansicht_termine = [{
+            "uid": e["id"], "ts": e["ts"], "end": e.get("end"), "titel": export_titel(e),
+            "ort": e.get("ort", ""), "beschreibung": "Aus der TuB Helfer-Orga",
+        } for e in entries if e["ts"] >= heute_export]
+
+        # Eigene Einsätze (inkl. Kinder): übernommene Aufgaben mit Termin des Spiels
+        familie = [user['user_id']] + (children_df['user_id'].tolist() if not children_df.empty else [])
+        meine_termine = []
+        if not assign_df.empty and not tasks_df.empty:
+            for _, a in assign_df[assign_df['user_id'].isin(familie)].iterrows():
+                tk = tasks_df[tasks_df['task_id'] == a['task_id']]
+                if tk.empty: continue
+                tk = tk.iloc[0]
+                ts, ort, bezug = parse_datum(tk.get('start_zeit')), "", ""
+                if pd.notna(tk.get('event_id')) and not events_df.empty:
+                    ev = events_df[events_df['event_id'] == tk['event_id']]
+                    if not ev.empty:
+                        ts = parse_datum(ev.iloc[0]['start_zeit']) or ts
+                        ort, bezug = str(ev.iloc[0].get('ort') or ""), str(ev.iloc[0]['titel'])
+                if ts is None or ts < heute_export: continue
+                wer = "" if a['user_id'] == user['user_id'] else f" – für {a['assignee_name']}"
+                info = f" ({a['kommentar']})" if pd.notna(a.get('kommentar')) and str(a.get('kommentar')).strip() else ""
+                meine_termine.append({
+                    "uid": f"a{a['task_id']}-{a['user_id']}", "ts": ts, "end": None,
+                    "titel": f"✅ {tk['kategorie']}{wer}" + (f": {bezug}" if bezug else ""),
+                    "ort": ort, "beschreibung": f"Deine Aufgabe in der TuB Helfer-Orga{info}",
+                })
+
+        with st.popover("In meinen Kalender übernehmen", icon=":material/event_available:"):
+            st.caption("Lädt eine Kalenderdatei (.ics) herunter. Am Handy öffnen und „Zum Kalender hinzufügen“ wählen; "
+                       "am PC in Google, Outlook oder Apple Kalender importieren.")
+            st.download_button(f"Angezeigte Termine ({len(ansicht_termine)})",
+                               data=build_ics(ansicht_termine, f"TuB Volleyball – {team_filter}"),
+                               file_name="tub-termine.ics", mime="text/calendar",
+                               icon=":material/download:", use_container_width=True,
+                               disabled=not ansicht_termine)
+            st.download_button(f"Nur meine Aufgaben ({len(meine_termine)})",
+                               data=build_ics(meine_termine, "TuB – Meine Aufgaben"),
+                               file_name="tub-meine-aufgaben.ics", mime="text/calendar",
+                               icon=":material/download:", use_container_width=True,
+                               disabled=not meine_termine)
+            st.caption("Hinweis: Das ist eine Momentaufnahme. Ändert sich ein Termin, die Datei einfach neu laden – "
+                       "die meisten Kalender aktualisieren dann den vorhandenen Eintrag.")
 
         WOCHENTAGE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
         MONATE = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
