@@ -37,7 +37,7 @@ MIN_PW_LENGTH = 8
 # ==========================================
 st.set_page_config(page_title="TuB Helfer-Orga", page_icon="🏐", layout="wide", initial_sidebar_state="auto")
 
-APP_VERSION = "4.5 (Angemeldet bleiben)"
+APP_VERSION = "4.6 (Kacheln Übersicht)"
 BRAND = "#82368c"        # Vereinslila (aus tub-bocholt.de)
 BRAND_DARK = "#5e2766"
 SCHIRI_COLOR = "#c2410c"  # Orange für Schiedsgericht-Termine
@@ -68,12 +68,23 @@ def inject_custom_css():
     .tub-section {{font-size: 1.1rem; font-weight: 700; margin: 6px 0 10px 0; display: flex; align-items: center; gap: 8px;}}
     .tub-section::before {{content: ""; width: 4px; height: 1.1em; background: {BRAND}; border-radius: 2px; display: inline-block;}}
 
+    /* ---------- Kennzahl-Kacheln (Übersicht) ---------- */
+    .kpi-grid {{display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px;}}
+    @media (max-width: 640px) {{ .kpi-grid {{grid-template-columns: 1fr;}} }}
+    .kpi {{background: #fff; border: 1px solid #eee5ef; border-radius: 14px; padding: 14px 18px;
+           box-shadow: 0 1px 3px rgba(43, 34, 48, 0.06);}}
+    .kpi .label {{font-size: .85rem; color: #555;}}
+    .kpi .value {{font-size: 2rem; font-weight: 700; line-height: 1.15; margin: 4px 0 2px 0;}}
+    .kpi .when {{font-size: .95rem; font-weight: 600; color: {BRAND};}}
+    .kpi .sub {{font-size: .82rem; color: #777; margin-top: 4px; overflow-wrap: anywhere;}}
+
     /* ---------- Badges ---------- */
     .tub-badge {{
         display: inline-block; background: rgba(130, 54, 140, 0.12); color: {BRAND};
         border-radius: 999px; padding: 1px 10px; font-size: .78rem; font-weight: 600; vertical-align: middle;
     }}
     .tub-badge.grey {{background: #ececec; color: #555;}}
+    .tub-badge.sr {{background: rgba(194, 65, 12, .12); color: {SCHIRI_COLOR};}}
 
     /* ---------- Karten (Container mit Rahmen) ---------- */
     div[data-testid="stVerticalBlockBorderWrapper"],
@@ -1021,30 +1032,39 @@ else:
             _n = int((assign_df['task_id'] == _tsk['task_id']).sum()) if not assign_df.empty else 0
             if _n < int(_tsk.get('max_helfer', 1) or 1): open_count += 1
 
-        next_ev_value, next_ev_caption = "–", "Kein Termin geplant"
+        WT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+        next_date, next_when, next_title, next_badge = "–", "", "Kein Termin geplant", ""
         if not events_df.empty:
             _rel = events_df[events_df['betroffene_teams'].apply(is_relevant)].copy()
             if not _rel.empty:
                 _rel['dt'] = parse_datum_series(_rel['start_zeit'])
                 _fut = _rel[_rel['dt'] >= pd.Timestamp.now()].sort_values('dt')
                 if not _fut.empty:
-                    next_ev_value = _fut.iloc[0]['dt'].strftime('%d.%m. · %H:%M')
-                    next_ev_caption = str(_fut.iloc[0]['titel'])
+                    _ev = _fut.iloc[0]
+                    _dt = _ev['dt']
+                    next_date = f"{WT[_dt.weekday()]}, {_dt.strftime('%d.%m.')}"
+                    _zeit = "" if _dt.strftime('%H:%M') == "00:00" else _dt.strftime('%H:%M') + " Uhr"
+                    _ort = str(_ev.get('ort') or "").strip()
+                    next_when = " · ".join([x for x in [_zeit, _ort] if x])
+                    next_title = str(_ev['titel'])
+                    _sr = (not tasks_df.empty) and bool(((tasks_df['event_id'] == _ev['event_id']) &
+                            tasks_df['kategorie'].astype(str).str.lower().str.contains('schiedsgericht')).any())
+                    if _sr and 'bocholt' not in next_title.lower():
+                        next_badge = '<span class="tub-badge sr">Schiedsgericht</span>'
 
-        k1, k2, k3 = st.columns(3)
-        with k1:
-            with st.container(border=True):
-                st.metric("Deine Helferpunkte", f"{my_points}")
-                st.caption("inkl. deiner Kinder")
-        with k2:
-            with st.container(border=True):
-                st.metric("Offene Aufgaben", f"{open_count}")
-                st.caption("in deinen Teams")
-        with k3:
-            with st.container(border=True):
-                st.metric("Nächster Spieltag", next_ev_value)
-                st.caption(next_ev_caption)
-        st.write("")
+        kacheln = (
+            '<div class="kpi-grid">'
+            f'<div class="kpi"><div class="label">Deine Helferpunkte</div><div class="value">{my_points}</div>'
+            '<div class="sub">inkl. deiner Kinder</div></div>'
+            f'<div class="kpi"><div class="label">Offene Aufgaben</div><div class="value">{open_count}</div>'
+            '<div class="sub">in deinen Teams</div></div>'
+            f'<div class="kpi"><div class="label">Nächster Spieltag {next_badge}</div>'
+            f'<div class="value">{html.escape(next_date)}</div>'
+            f'<div class="when">{html.escape(next_when)}</div>'
+            f'<div class="sub">{html.escape(next_title)}</div></div>'
+            '</div>'
+        )
+        st.markdown(kacheln, unsafe_allow_html=True)
         
         # --- HIGHLIGHT: FAHRER ---
         section_title("🚗 Fahrer für Auswärtsspiele gesucht")
