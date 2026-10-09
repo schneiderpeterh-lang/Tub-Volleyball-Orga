@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import datetime
 import hashlib
+import hmac
 import secrets
 import uuid
 import io
@@ -18,6 +19,14 @@ try:
 except ImportError:
     st.error("📦 **Fehlendes Paket!** Bitte füge `streamlit-calendar` zu deiner `requirements.txt` auf GitHub hinzu, um die Kalender-Ansicht zu nutzen.")
     st.stop()
+
+# ==========================================
+# 0. SICHERHEITS-KONSTANTEN
+# ==========================================
+PW_ITERATIONS = 600_000
+ALLOWED_SELF_ROLES = ["Spieler", "Elternteil"]  # diese Rollen darf man bei der Registrierung selbst wählen
+VERGEBBARE_ROLLEN = ["Spieler", "Elternteil", "Trainer", "Organisator", "Admin"]  # nur durch einen Admin vergebbar
+MIN_PW_LENGTH = 8
 
 # ==========================================
 # 1. KONFIGURATION & DATENBANK-VERBINDUNG
@@ -56,7 +65,7 @@ with st.sidebar:
         """)
         
     st.divider()
-    st.caption("App-Version 3.1 (Tabs & chronologische Sortierung) | Status: Online 🟢")
+    st.caption("App-Version 3.2 (Sicherheits-Update) | Status: Online 🟢")
 
 def inject_custom_css():
     st.markdown("""
@@ -104,12 +113,13 @@ inject_custom_css()
 @st.cache_resource
 def get_database_engine():
     try:
-        db_url = st.secrets["DB_URL"].replace("6543", "5432")
+        # Nur den Port austauschen (nicht jedes Vorkommen von "6543", z. B. im Passwort)
+        db_url = st.secrets["DB_URL"].replace(":6543/", ":5432/")
         
         if db_url.startswith("postgres://"):
-            db_url = db_url.replace("postgres://", "postgresql+psycopg2://")
+            db_url = db_url.replace("postgres://", "postgresql+psycopg2://", 1)
         elif db_url.startswith("postgresql://") and not db_url.startswith("postgresql+psycopg2://"):
-            db_url = db_url.replace("postgresql://", "postgresql+psycopg2://")
+            db_url = db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
             
         return create_engine(
             db_url, 
@@ -142,6 +152,7 @@ def update_db_schema(_engine):
         try:
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES users(user_id);"))
             conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS team TEXT;"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS dsgvo_zeitpunkt TIMESTAMPTZ;"))
         except Exception: pass 
             
         conn.execute(text("""
@@ -224,14 +235,24 @@ except Exception as e:
 # ==========================================
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
-    hash_obj = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
-    return f"{salt}${hash_obj.hex()}"
+    h = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), PW_ITERATIONS)
+    return f"pbkdf2_sha256${PW_ITERATIONS}${salt}${h.hex()}"
 
-def verify_password(password: str, hashed_password: str) -> bool:
-    if "$" not in hashed_password: return password == hashed_password
-    salt, hash_hex = hashed_password.split('$')
-    hash_obj = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
-    return hash_obj.hex() == hash_hex
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        parts = str(stored).split("$")
+        if len(parts) == 4 and parts[0] == "pbkdf2_sha256":   # neues Format
+            _, iters, salt, hash_hex = parts
+            iters = int(iters)
+        elif len(parts) == 2:                                 # altes Format: salt$hash
+            salt, hash_hex = parts
+            iters = 100_000
+        else:
+            return False                                      # kein Klartext-Vergleich mehr
+        h = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), iters)
+        return hmac.compare_digest(h.hex(), hash_hex)
+    except Exception:
+        return False
 
 def reset_password(user_id, new_password):
     hashed = hash_password(new_password)
@@ -248,9 +269,9 @@ def clear_caches():
 
 @st.cache_data(ttl=60)
 def get_user_count():
-    try:
-        with engine.connect() as conn: return conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
-    except: return 0
+    # Absichtlich ohne try/except: Bei einem Datenbankfehler soll NICHT das Admin-Setup erscheinen.
+    with engine.connect() as conn:
+        return conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
 
 @st.cache_data(ttl=60)
 def get_all_users():
@@ -263,19 +284,26 @@ def create_initial_admin(name, email, password):
     hashed = hash_password(password)
     try:
         with engine.begin() as conn:
-            conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, :h, 'Admin', 1, 'Kein Team')"),
-                {"n": name, "e": email, "h": hashed})
+            conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, dsgvo_zeitpunkt, team) VALUES (:n, :e, :h, 'Admin', 1, NOW(), 'Kein Team')"),
+                {"n": name.strip(), "e": email.strip().lower(), "h": hashed})
         clear_caches()
         return True
     except: return False
 
 def register_new_user(name, email, password, rolle, team_list):
+    # Serverseitige Prüfung: höhere Rollen darf nur ein Admin vergeben
+    if rolle not in ALLOWED_SELF_ROLES:
+        return False, "Diese Rolle kann nicht selbst gewählt werden."
+    if len(password) < MIN_PW_LENGTH:
+        return False, f"Das Passwort muss mindestens {MIN_PW_LENGTH} Zeichen lang sein."
     hashed = hash_password(password)
     team_str = ", ".join(team_list) if team_list else "Kein Team"
     try:
         with engine.begin() as conn:
-            conn.execute(text("INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, team) VALUES (:n, :e, :h, :r, 1, :t)"),
-                {"n": name, "e": email, "h": hashed, "r": rolle, "t": team_str})
+            conn.execute(text("""
+                INSERT INTO users (name, email, password_hash, rolle, dsgvo_akzeptiert, dsgvo_zeitpunkt, team)
+                VALUES (:n, :e, :h, :r, 1, NOW(), :t)
+            """), {"n": name.strip(), "e": email.strip().lower(), "h": hashed, "r": rolle, "t": team_str})
         clear_caches()
         return True, "Erfolgreich registriert!"
     except Exception as e:
@@ -283,10 +311,39 @@ def register_new_user(name, email, password, rolle, team_list):
         return False, str(e)
 
 def authenticate(email, password):
+    email = (email or "").strip()
+    if not email or not password:
+        return None
     with engine.connect() as conn:
-        result = conn.execute(text("SELECT * FROM users WHERE email = :email AND rolle != 'Kind'"), {"email": email}).fetchone()
-        if result and verify_password(password, result.password_hash): return dict(result._mapping)
+        result = conn.execute(
+            text("SELECT * FROM users WHERE LOWER(email) = LOWER(:email) AND rolle != 'Kind'"),
+            {"email": email},
+        ).fetchone()
+    if result and verify_password(password, result.password_hash):
+        user_data = dict(result._mapping)
+        # Alte Hashes beim erfolgreichen Login automatisch auf das neue Format aktualisieren
+        if not str(user_data.get("password_hash", "")).startswith("pbkdf2_sha256$"):
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("UPDATE users SET password_hash = :h WHERE user_id = :u"),
+                                 {"h": hash_password(password), "u": user_data["user_id"]})
+            except Exception:
+                pass
+        user_data.pop("password_hash", None)  # Hash nicht in der Session speichern
+        return user_data
     return None
+
+def set_user_role(user_id, rolle):
+    if rolle not in VERGEBBARE_ROLLEN:
+        return False, "Ungültige Rolle."
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE users SET rolle = :r WHERE user_id = :u AND rolle != 'Kind'"),
+                         {"r": rolle, "u": user_id})
+        clear_caches()
+        return True, "Rolle geändert. Sie gilt für den Nutzer ab dem nächsten Login."
+    except Exception as e:
+        return False, str(e)
 
 def add_child(parent_id, child_name, child_team_list):
     dummy_email = f"kind_{uuid.uuid4().hex[:8]}@tub.lokal"
@@ -329,6 +386,9 @@ def delete_user(user_id):
             conn.execute(text("UPDATE users SET parent_id = NULL WHERE parent_id = :id"), {"id": user_id})
             conn.execute(text("DELETE FROM task_assignments WHERE user_id = :id"), {"id": user_id})
             conn.execute(text("DELETE FROM event_attendance WHERE user_id = :id"), {"id": user_id})
+            # Fremdschlüssel in tasks lösen, damit das Löschen nicht fehlschlägt
+            conn.execute(text("UPDATE tasks SET erstellt_von = NULL WHERE erstellt_von = :id"), {"id": user_id})
+            conn.execute(text("UPDATE tasks SET zugewiesen_an = NULL WHERE zugewiesen_an = :id"), {"id": user_id})
             conn.execute(text("DELETE FROM users WHERE user_id = :id"), {"id": user_id})
         clear_caches()
         return True, "Account gelöscht."
@@ -576,7 +636,14 @@ KATEGORIE_OPTIONEN = ["Catering", "Fahrdienst", "Aufbau/Abbau", "Schiedsgericht"
 if 'logged_in_user' not in st.session_state:
     st.session_state['logged_in_user'] = None
 
-if get_user_count() == 0:
+# Datenbankfehler sichtbar machen, statt fälschlich das Admin-Setup anzuzeigen
+try:
+    user_count = get_user_count()
+except Exception:
+    st.error("Die Datenbank ist gerade nicht erreichbar. Bitte versuche es in ein paar Minuten erneut.")
+    st.stop()
+
+if user_count == 0:
     st.warning("⚠️ Keine Benutzer in der Datenbank gefunden. Richte den Admin ein:")
     with st.form("setup"):
         if st.form_submit_button("Admin erstellen") and create_initial_admin(st.text_input("Name"), st.text_input("E-Mail"), st.text_input("Passwort", type="password")):
@@ -588,21 +655,28 @@ elif st.session_state['logged_in_user'] is None:
     
     with t_login:
         with st.form("login"):
-            user = authenticate(st.text_input("E-Mail"), st.text_input("Passwort", type="password"))
-            if st.form_submit_button("Einloggen"):
-                if user:
-                    st.session_state['logged_in_user'] = user
-                    st.rerun()
-                else: 
-                    st.error("Zugangsdaten ungültig.")
+            login_email = st.text_input("E-Mail")
+            login_pw = st.text_input("Passwort", type="password")
+            login_submitted = st.form_submit_button("Einloggen")
+        if login_submitted:
+            logged_user = authenticate(login_email, login_pw)
+            if logged_user:
+                st.session_state['logged_in_user'] = logged_user
+                st.rerun()
+            else: 
+                st.error("Zugangsdaten ungültig.")
                     
         if st.button("Passwort vergessen?", use_container_width=True):
             st.info("💡 **Passwort vergessen?** Bitte sprich einen Trainer oder Administrator an. Diese können dir in Sekunden ein neues Passwort vergeben.")
                     
     with t_reg:
         with st.form("reg"):
-            n, e, p = st.text_input("Name"), st.text_input("E-Mail"), st.text_input("Passwort", type="password")
-            r, t = st.selectbox("Rolle", ["Spieler", "Trainer", "Elternteil", "Organisator"]), st.multiselect("Team", TEAM_LISTE)
+            n = st.text_input("Name")
+            e = st.text_input("E-Mail")
+            p = st.text_input(f"Passwort (mind. {MIN_PW_LENGTH} Zeichen)", type="password")
+            r = st.selectbox("Ich bin", ALLOWED_SELF_ROLES)
+            t = st.multiselect("Team", TEAM_LISTE)
+            code = st.text_input("Vereinscode (bekommst du vom Trainer oder der Orga)", type="password")
             
             st.markdown("---")
             with st.expander("🛡️ Datenschutzhinweise anzeigen"):
@@ -618,7 +692,10 @@ elif st.session_state['logged_in_user'] is None:
             st.markdown("---")
             
             if st.form_submit_button("Registrieren"):
-                if not dsgvo:
+                expected_code = str(st.secrets.get("VEREINSCODE", ""))
+                if not expected_code or not hmac.compare_digest(code.encode("utf-8"), expected_code.encode("utf-8")):
+                    st.error("Der Vereinscode ist ungültig.")
+                elif not dsgvo:
                     st.warning("⚠️ Bitte stimme den Datenschutzrichtlinien zu, um dich zu registrieren.")
                 elif not (n and e and p):
                     st.warning("⚠️ Bitte fülle alle Pflichtfelder (Name, E-Mail, Passwort) aus.")
@@ -1177,7 +1254,7 @@ else:
                 for _, tk in tasks_df[tasks_df['event_id'].isna() & tasks_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
                     start_iso = parse_to_iso(tk.get('start_zeit'))
                     if start_iso:
-                        icon = "哨" if "schiedsgericht" in str(tk['kategorie']).lower() else "📋"
+                        icon = "🧑‍⚖️" if "schiedsgericht" in str(tk['kategorie']).lower() else "📋"
                         
                         calendar_events.append({
                             "title": f"{icon} {tk['kategorie']} ({tk.get('betroffene_teams', 'Alle')})",
@@ -1303,6 +1380,25 @@ else:
             st.dataframe(all_users_df, use_container_width=True)
             
             st.divider()
+            st.subheader("🎭 Rollen vergeben")
+            st.write("Trainer, Organisatoren und weitere Admins können sich nicht selbst registrieren. Hier vergibst du diese Rollen.")
+            if not all_users_df.empty:
+                with st.form("role_form"):
+                    erwachsene = all_users_df[all_users_df['rolle'] != 'Kind']
+                    opts_r = {r['user_id']: f"{r['name']} ({r['rolle']})" for _, r in erwachsene.iterrows()}
+                    role_uid = st.selectbox("Benutzer", list(opts_r.keys()), format_func=lambda x: opts_r[x])
+                    new_role = st.selectbox("Neue Rolle", VERGEBBARE_ROLLEN)
+                    if st.form_submit_button("Rolle speichern"):
+                        if role_uid == user['user_id'] and new_role != 'Admin':
+                            st.warning("Du kannst dir nicht selbst die Admin-Rolle entziehen.")
+                        else:
+                            ok, msg = set_user_role(role_uid, new_role)
+                            if ok:
+                                st.success(msg)
+                            else:
+                                st.error(msg)
+            
+            st.divider()
             st.subheader("🔑 Passwort zurücksetzen")
             st.write("Vergib hier ein neues Passwort für Nutzer, die ihres vergessen haben.")
             with st.form("reset_pw_form"):
@@ -1311,8 +1407,8 @@ else:
                 new_pw = st.text_input("Neues Passwort", type="password")
                 
                 if st.form_submit_button("Passwort überschreiben"):
-                    if new_pw.strip() == "":
-                        st.warning("Bitte ein gültiges Passwort eingeben.")
+                    if len(new_pw.strip()) < MIN_PW_LENGTH:
+                        st.warning(f"Bitte ein Passwort mit mindestens {MIN_PW_LENGTH} Zeichen eingeben.")
                     else:
                         succ, msg = reset_password(reset_id, new_pw)
                         if succ: 
