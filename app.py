@@ -6,6 +6,7 @@ import hmac
 import secrets
 import uuid
 import io
+import re
 import os
 import html
 from sqlalchemy import create_engine, text
@@ -35,7 +36,7 @@ MIN_PW_LENGTH = 8
 # ==========================================
 st.set_page_config(page_title="TuB Helfer-Orga", page_icon="🏐", layout="wide", initial_sidebar_state="auto")
 
-APP_VERSION = "4.2 (Schiedsgericht im Kalender)"
+APP_VERSION = "4.3 (SAMS-Import nur TuB)"
 BRAND = "#82368c"        # Vereinslila (aus tub-bocholt.de)
 BRAND_DARK = "#5e2766"
 SCHIRI_COLOR = "#c2410c"  # Orange für Schiedsgericht-Termine
@@ -451,56 +452,100 @@ def delete_user(user_id):
 # ==========================================
 # 4. EVENTS, AUFGABEN & CSV IMPORT SQL
 # ==========================================
-def parse_and_import_csv(file_bytes, team_str):
+# Erkennt TuB-Bocholt-Mannschaften ("TuB Bocholt", "TuB Bocholt 2", "TuB 1907 Bocholt" ...),
+# aber NICHT andere Bocholter Vereine. Bei Bedarf hier anpassen.
+TUB_MUSTER = re.compile(r"\btub\b.*\bbocholt\b|\bbocholt\b.*\btub\b", re.IGNORECASE)
+
+def ist_tub(name):
+    if name is None or (isinstance(name, float) and pd.isna(name)):
+        return False
+    return bool(TUB_MUSTER.search(" ".join(str(name).split())))
+
+def _find_col(columns, *needles):
+    for c in columns:
+        lc = str(c).strip().lower()
+        if all(n in lc for n in needles):
+            return c
+    return None
+
+def _clean(v):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    return str(v).strip()
+
+def read_sams_csv(file_bytes):
+    """Liest die SAMS-CSV und gibt nur Spiele zurück, bei denen TuB Bocholt spielt oder das Schiedsgericht stellt."""
     try:
         try:
-            content = file_bytes.decode('utf-8')
+            content = file_bytes.decode('utf-8-sig')
         except UnicodeDecodeError:
             content = file_bytes.decode('iso-8859-1')
-            
-        df = pd.read_csv(io.StringIO(content), sep=';')
+        df = pd.read_csv(io.StringIO(content), sep=';', dtype=str)
         if len(df.columns) < 2:
-            df = pd.read_csv(io.StringIO(content), sep=',')
-        
-        events_added = 0
-        tasks_added = 0
-        
+            df = pd.read_csv(io.StringIO(content), sep=',', dtype=str)
+    except Exception as e:
+        return None, f"Die Datei konnte nicht gelesen werden: {e}"
+
+    c_m1 = _find_col(df.columns, "mannschaft 1")
+    c_m2 = _find_col(df.columns, "mannschaft 2")
+    c_sr = _find_col(df.columns, "schiedsgericht")
+    c_datum = _find_col(df.columns, "datum")
+    c_zeit = _find_col(df.columns, "uhrzeit")
+    c_ort = _find_col(df.columns, "austragungsort")
+    fehlend = [n for n, c in [("Mannschaft 1", c_m1), ("Mannschaft 2", c_m2), ("Datum", c_datum)] if c is None]
+    if fehlend:
+        return None, "In der CSV fehlen die Spalten: " + ", ".join(fehlend) + ". Ist das ein Spielplan-Export aus SAMS?"
+
+    zeilen = []
+    for _, row in df.iterrows():
+        m1, m2 = _clean(row[c_m1]), _clean(row[c_m2])
+        sr = _clean(row[c_sr]) if c_sr else ""
+        spielt = ist_tub(m1) or ist_tub(m2)
+        pfeift = ist_tub(sr)
+        if not (spielt or pfeift):
+            continue
+        datum = _clean(row[c_datum]).replace(',', '')
+        zeit = _clean(row[c_zeit]) if c_zeit else ""
+        rolle = "Spiel + Schiedsgericht" if (spielt and pfeift) else ("Spiel" if spielt else "Schiedsgericht")
+        zeilen.append({
+            "Datum": datum, "Uhrzeit": zeit, "Spiel": f"{m1} vs. {m2}",
+            "Rolle": rolle, "Ort": _clean(row[c_ort]) if c_ort else "",
+            "_start": f"{datum} {zeit}".strip(), "_schiri": pfeift,
+        })
+    info = f"{len(zeilen)} von {len(df)} Spielen betreffen TuB Bocholt (als Mannschaft oder Schiedsgericht)."
+    return pd.DataFrame(zeilen), info
+
+def import_sams_rows(rows, team_str):
+    """Legt die gefilterten Spiele an. Bereits vorhandene Spiele (gleicher Titel, Termin und Team) werden übersprungen."""
+    events_added = tasks_added = skipped = 0
+    try:
         with engine.begin() as conn:
-            for _, row in df.iterrows():
-                m1 = str(row.get('Mannschaft 1', 'Unbekannt'))
-                m2 = str(row.get('Mannschaft 2', 'Unbekannt'))
-                schiri = str(row.get('Schiedsgericht', ''))
-                
-                if 'bocholt' not in m1.lower() and 'bocholt' not in m2.lower() and 'bocholt' not in schiri.lower():
+            for _, r in rows.iterrows():
+                vorhanden = conn.execute(text("""
+                    SELECT 1 FROM events WHERE titel = :titel AND start_zeit = :start AND betroffene_teams = :teams LIMIT 1
+                """), {"titel": r["Spiel"], "start": r["_start"], "teams": team_str}).fetchone()
+                if vorhanden:
+                    skipped += 1
                     continue
-                
-                ort = str(row.get('Austragungsort', ''))
-                
-                date_col = [c for c in df.columns if 'Datum' in c]
-                dt_str = str(row[date_col[0]]) if date_col else ""
-                start_str = dt_str.replace(',', '').strip() if dt_str else ""
-                titel = f"{m1} vs. {m2}"
-                
-                res = conn.execute(text("""
+                event_id = conn.execute(text("""
                     INSERT INTO events (titel, start_zeit, ende_zeit, ort, betroffene_teams)
                     VALUES (:titel, :start, :ende, :ort, :teams)
                     RETURNING event_id
-                """), {"titel": titel, "start": start_str, "ende": "", "ort": ort, "teams": team_str})
-                
-                event_id = res.scalar()
+                """), {"titel": r["Spiel"], "start": r["_start"], "ende": "", "ort": r["Ort"], "teams": team_str}).scalar()
                 events_added += 1
-                
-                if 'bocholt' in schiri.lower():
+                if r["_schiri"]:
                     conn.execute(text("""
                         INSERT INTO tasks (kategorie, beschreibung, max_helfer, start_zeit, betroffene_teams, event_id, punkte)
                         VALUES ('Schiedsgericht', 'Wir stellen das Schiedsgericht für dieses Spiel.', 2, :st, :teams, :ev, 2)
-                    """), {"st": start_str, "teams": team_str, "ev": event_id})
+                    """), {"st": r["_start"], "teams": team_str, "ev": event_id})
                     tasks_added += 1
-        
         clear_caches()
-        return True, f"Erfolg! {events_added} relevante Spiele und {tasks_added} Schiedsgericht-Aufgaben für {team_str} importiert."
+        msg = f"{events_added} Spiele und {tasks_added} Schiedsgericht-Aufgaben für {team_str} importiert."
+        if skipped:
+            msg += f" {skipped} Spiel war schon vorhanden und wurde übersprungen." if skipped == 1 else f" {skipped} Spiele waren schon vorhanden und wurden übersprungen."
+        return True, msg
     except Exception as e:
-        return False, f"Fehler beim CSV Import: {e}"
+        return False, f"Fehler beim Import: {e}"
 
 @st.cache_data(ttl=60)
 def get_all_events():
@@ -1504,16 +1549,26 @@ else:
         st.divider()
             
         st.subheader("📅 Spielplan-Import (SAMS CSV)")
-        st.write("Lade hier den Spielplan als **CSV-Datei** aus SAMS hoch. Wenn TuB Bocholt als Schiedsgericht eingeteilt ist, wird automatisch eine entsprechende Aufgabe angelegt!")
-        with st.form("csv_import"):
-            csv_file = st.file_uploader("SAMS CSV-Datei auswählen", type=["csv"])
-            target_team = st.multiselect("Für welches Team gilt dieser Spielplan?", TEAM_LISTE)
-            if st.form_submit_button("Spielplan importieren"):
-                if csv_file and target_team:
-                    succ, msg = parse_and_import_csv(csv_file.read(), ", ".join(target_team))
-                    if succ: st.success(msg)
-                    else: st.error(msg)
-                else: st.warning("Bitte Datei und Team wählen.")
+        st.write("Lade den Spielplan als **CSV-Datei** aus SAMS hoch. Übernommen werden **nur Spiele, bei denen TuB Bocholt spielt oder das Schiedsgericht stellt**. Für Schiedsgericht-Einsätze wird automatisch eine Aufgabe angelegt.")
+        csv_file = st.file_uploader("SAMS CSV-Datei auswählen", type=["csv"], key="sams_csv")
+        if csv_file is not None:
+            sams_rows, sams_info = read_sams_csv(csv_file.getvalue())
+            if sams_rows is None:
+                st.error(sams_info)
+            elif sams_rows.empty:
+                st.warning(sams_info + " Es gibt nichts zu importieren.")
+            else:
+                st.caption(sams_info + " Vorschau:")
+                st.dataframe(sams_rows[["Datum", "Uhrzeit", "Spiel", "Rolle", "Ort"]], hide_index=True, use_container_width=True)
+                with st.form("csv_import"):
+                    target_team = st.multiselect("Für welches Team gilt dieser Spielplan?", TEAM_LISTE)
+                    if st.form_submit_button(f"Diese {len(sams_rows)} Spiele importieren"):
+                        if target_team:
+                            succ, msg = import_sams_rows(sams_rows, ", ".join(target_team))
+                            if succ: st.success(msg)
+                            else: st.error(msg)
+                        else:
+                            st.warning("Bitte ein Team wählen.")
                     
         st.divider()
         st.subheader("👥 User-Verwaltung")
