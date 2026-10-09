@@ -6,6 +6,8 @@ import hmac
 import secrets
 import uuid
 import io
+import os
+import html
 from sqlalchemy import create_engine, text
 
 try:
@@ -31,84 +33,135 @@ MIN_PW_LENGTH = 8
 # ==========================================
 # 1. KONFIGURATION & DATENBANK-VERBINDUNG
 # ==========================================
-st.set_page_config(page_title="TuB Orga", page_icon="🏐", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="TuB Helfer-Orga", page_icon="🏐", layout="wide", initial_sidebar_state="auto")
 
-with st.sidebar:
-    st.title("🏐 TuB Bocholt")
-    st.markdown("### Helfer-Organisation")
-    st.markdown("Hier organisieren wir unsere Spieltage, Turniere und Aufgaben im Verein.")
-    st.divider()
-    
-    st.markdown("#### Rechtliches")
-    with st.expander("⚖️ Impressum", expanded=False):
-        st.markdown("""
-        **TuB Bocholt 1907 e.V.**
-        Abteilung Volleyball
-        Lowicker Str. 19c
-        46395 Bocholt
-        
-        **Vertreten durch:**
-        Abteilungsleitung Volleyball
-        
-        **Kontakt:**
-        E-Mail: info@tub-bocholt-volleyball.de
-        Web: www.tub-bocholt-volleyball.de
-        """)
-        
-    with st.expander("🛡️ Datenschutz", expanded=False):
-        st.markdown("""
-        **Zweck der Datenspeicherung:**
-        Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben.
-        
-        **Sicherheit:**
-        Die Daten werden sicher und verschlüsselt gespeichert. Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten.
-        """)
-        
-    st.divider()
-    st.caption("App-Version 3.3 (Vereinsfarben) | Status: Online 🟢")
+APP_VERSION = "4.0 (Neues Design)"
+BRAND = "#82368c"        # Vereinslila (aus tub-bocholt.de)
+BRAND_DARK = "#5e2766"
+LOGO_PATH = "logo.png"   # optional: Vereinslogo als logo.png ins Repo legen
 
 def inject_custom_css():
-    st.markdown("""
+    st.markdown(f"""
     <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    
-    .stButton > button {
-        border-radius: 8px !important;
-        transition: all 0.3s ease !important;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
-        font-weight: 500 !important;
-    }
-    .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 10px rgba(0,0,0,0.15) !important;
-    }
-    
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        padding-bottom: 5px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 6px 6px 0px 0px;
-        padding: 10px 16px;
-        transition: background-color 0.3s ease;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: rgba(130, 54, 140, 0.10); 
-        border-bottom: 3px solid #82368c;
-    }
-    
-    div[data-testid="stContainer"] {
-        border-radius: 12px;
-        transition: all 0.3s ease;
-    }
-    div[data-testid="stContainer"]:hover {
-        border-color: #82368c; 
-    }
+    #MainMenu {{visibility: hidden;}}
+    footer {{visibility: hidden;}}
+    .block-container {{padding-top: 2rem; max-width: 1200px;}}
+
+    /* ---------- Kopfbereich im Vereinsstil ---------- */
+    .tub-header {{
+        background: linear-gradient(135deg, {BRAND} 0%, {BRAND_DARK} 100%);
+        color: #fff; padding: 20px 26px; border-radius: 16px; margin-bottom: 22px;
+        box-shadow: 0 6px 18px rgba(94, 39, 102, 0.25);
+    }}
+    .tub-header .eyebrow {{font-size: .78rem; letter-spacing: .1em; text-transform: uppercase; opacity: .85;}}
+    .tub-header .title {{font-size: 1.75rem; font-weight: 700; line-height: 1.2; margin-top: 2px;}}
+    .tub-header .sub {{font-size: .95rem; opacity: .9; margin-top: 4px;}}
+    @media (max-width: 640px) {{
+        .tub-header {{padding: 14px 16px; border-radius: 12px;}}
+        .tub-header .title {{font-size: 1.35rem;}}
+    }}
+
+    /* ---------- Abschnittstitel ---------- */
+    .tub-section {{font-size: 1.1rem; font-weight: 700; margin: 6px 0 10px 0; display: flex; align-items: center; gap: 8px;}}
+    .tub-section::before {{content: ""; width: 4px; height: 1.1em; background: {BRAND}; border-radius: 2px; display: inline-block;}}
+
+    /* ---------- Badges ---------- */
+    .tub-badge {{
+        display: inline-block; background: rgba(130, 54, 140, 0.12); color: {BRAND};
+        border-radius: 999px; padding: 1px 10px; font-size: .78rem; font-weight: 600; vertical-align: middle;
+    }}
+    .tub-badge.grey {{background: #ececec; color: #555;}}
+
+    /* ---------- Karten (Container mit Rahmen) ---------- */
+    div[data-testid="stVerticalBlockBorderWrapper"],
+    div[data-testid="stContainer"] {{
+        border-radius: 14px; background: #ffffff;
+        box-shadow: 0 1px 3px rgba(43, 34, 48, 0.06);
+        transition: box-shadow .2s ease, border-color .2s ease;
+    }}
+    div[data-testid="stVerticalBlockBorderWrapper"]:hover,
+    div[data-testid="stContainer"]:hover {{
+        box-shadow: 0 6px 16px rgba(43, 34, 48, 0.10);
+    }}
+
+    /* ---------- Buttons ---------- */
+    .stButton > button, .stFormSubmitButton > button {{
+        border-radius: 10px !important; font-weight: 600 !important;
+        transition: all .2s ease !important;
+    }}
+    .stButton > button:hover, .stFormSubmitButton > button:hover {{transform: translateY(-1px);}}
+
+    /* ---------- Tabs (Login) ---------- */
+    .stTabs [data-baseweb="tab-list"] {{gap: 8px;}}
+    .stTabs [data-baseweb="tab"] {{border-radius: 8px 8px 0 0; padding: 10px 16px;}}
+    .stTabs [aria-selected="true"] {{background-color: rgba(130, 54, 140, 0.10);}}
+
+    /* ---------- Sidebar ---------- */
+    section[data-testid="stSidebar"] {{border-right: 1px solid rgba(130, 54, 140, 0.12);}}
+    .tub-user {{background: #fff; border-radius: 12px; padding: 12px 14px; border: 1px solid rgba(130,54,140,.15);}}
+    .tub-user .name {{font-weight: 700;}}
+    .tub-user .role {{font-size: .82rem; color: {BRAND}; font-weight: 600;}}
     </style>
     """, unsafe_allow_html=True)
 
 inject_custom_css()
+
+def render_header(subtitle="Spieltage, Helferaufgaben und Fahrten an einem Ort"):
+    st.markdown(f"""
+    <div class="tub-header">
+        <div class="eyebrow">TuB Bocholt 1907 e.V. · Volleyball</div>
+        <div class="title">Helfer-Orga</div>
+        <div class="sub">{subtitle}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+def section_title(text_):
+    st.markdown(f'<div class="tub-section">{html.escape(str(text_))}</div>', unsafe_allow_html=True)
+
+def points_badge(points):
+    try: p = int(points)
+    except Exception: p = 1
+    return f'<span class="tub-badge">★ {p} Pkt.</span>'
+
+def render_capacity(cur, mx, names=None):
+    mx = max(int(mx or 1), 1)
+    st.progress(min(cur / mx, 1.0), text=f"{cur} von {mx} Plätzen belegt")
+    if names:
+        st.caption("Eingetragen: " + ", ".join(names))
+
+def render_footer():
+    st.write("")
+    st.divider()
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        with st.expander("Impressum"):
+            st.markdown("""
+            **TuB Bocholt 1907 e.V.**
+            Abteilung Volleyball
+            Lowicker Str. 19c
+            46395 Bocholt
+
+            **Vertreten durch:**
+            Abteilungsleitung Volleyball
+
+            **Kontakt:**
+            E-Mail: info@tub-bocholt-volleyball.de
+            Web: www.tub-bocholt-volleyball.de
+            """)
+    with c2:
+        with st.expander("Datenschutz"):
+            st.markdown("""
+            **Zweck der Datenspeicherung:**
+            Wir speichern deinen Namen, deine E-Mail-Adresse und deine Teamzugehörigkeit ausschließlich zur internen Organisation von Spieltagen und Helferaufgaben.
+
+            **Sicherheit:**
+            Die Daten werden sicher und verschlüsselt gespeichert. Du hast jederzeit das Recht auf Auskunft, Berichtigung und Löschung deiner Daten.
+            """)
+    with c3:
+        st.caption(f"App-Version {APP_VERSION}")
+
+if os.path.exists(LOGO_PATH):
+    st.logo(LOGO_PATH)
 
 @st.cache_resource
 def get_database_engine():
@@ -629,7 +682,7 @@ def render_task_accept_ui(tsk_row, options, key_prefix):
 # ==========================================
 # 5. UI COMPONENTS
 # ==========================================
-st.title("🏐 TuB Helfer-Orga")
+render_header()
 TEAM_LISTE = ["U12", "U13", "U14", "U16", "U18", "U20", "Herren 1", "Herren 2", "Herren 3", "Herren 4", "Damen 1"]
 KATEGORIE_OPTIONEN = ["Catering", "Fahrdienst", "Aufbau/Abbau", "Schiedsgericht", "Sonstiges (Freitext)"]
 
@@ -708,13 +761,6 @@ elif st.session_state['logged_in_user'] is None:
 
 else:
     user = st.session_state['logged_in_user']
-    col_w, col_logout = st.columns([5, 1])
-    with col_w:
-        st.write(f"Willkommen zurück, **{user['name']}** - {user['rolle']}!")
-    with col_logout:
-        if st.button("🚪 Ausloggen", use_container_width=True):
-            st.session_state['logged_in_user'] = None
-            st.rerun()
 
     children_df = get_children(user['user_id'])
     tasks_df = get_all_tasks()
@@ -737,50 +783,11 @@ else:
             return True 
         return any(t.strip() in my_teams for t in str(teams_str).split(','))
 
-    tab_titles = ["🏠 Übersicht", "🏆 Spieltage & Events", "📋 Freie Aufgaben"]
-    
-    if user['rolle'] != 'Elternteil':
-        tab_titles.append("📅 Kalender-Ansicht")
-        
-    tab_titles.append("👨‍👩‍👧 Familie")
-    
-    if user['rolle'] in ['Admin', 'Organisator', 'Trainer']:
-        tab_titles.append("📊 Punkte & Auswertung")
-    
-    if user['rolle'] == 'Admin':
-        tab_titles.append("👥 Admin")
-        
-    tabs = st.tabs(tab_titles)
-    
-    tab_idx = 0
-    tab_overview = tabs[tab_idx]; tab_idx += 1
-    tab_events = tabs[tab_idx]; tab_idx += 1
-    tab_tasks = tabs[tab_idx]; tab_idx += 1
-    
-    if user['rolle'] != 'Elternteil':
-        tab_calendar = tabs[tab_idx]; tab_idx += 1
-    else:
-        tab_calendar = None
-        
-    tab_family = tabs[tab_idx]; tab_idx += 1
-    
-    if user['rolle'] in ['Admin', 'Organisator', 'Trainer']:
-        tab_stats = tabs[tab_idx]; tab_idx += 1
-    else:
-        tab_stats = None
-    
-    if user['rolle'] == 'Admin':
-        tab_admin = tabs[tab_idx]; tab_idx += 1
-    else:
-        tab_admin = None
-
-    if 'selected_event_team' not in st.session_state:
-        st.session_state['selected_event_team'] = None
 
     # ----------------------------------------------------
     # TAB 0: ÜBERSICHT (DASHBOARD)
     # ----------------------------------------------------
-    with tab_overview:
+    def page_overview():
         my_family_uids = [user['user_id']]
         if not children_df.empty:
             my_family_uids.extend(children_df['user_id'].tolist())
@@ -789,13 +796,6 @@ else:
         if not points_df.empty:
             my_points = int(points_df[points_df['user_id'].isin(my_family_uids)]['gesamt_punkte'].sum())
             
-        col_pts, col_info = st.columns([1, 3])
-        with col_pts:
-            st.metric(label="🌟 Deine Helferpunkte", value=f"{my_points} Pkt.")
-        with col_info:
-            st.write("Dein schneller Überblick: Wo wird aktuell Hilfe gebraucht und wofür bist du schon eingetragen?")
-        
-        st.divider()
 
         # AUFGABEN VORBEREITEN & SORTIEREN
         def parse_to_datetime(date_str):
@@ -834,9 +834,41 @@ else:
             sorted_tasks.sort(key=lambda x: x['sort_date'])
 
         my_assigned_tids = assign_df[assign_df['user_id'].isin(my_family_uids)]['task_id'].unique().tolist() if not assign_df.empty else []
+
+        # --- KENNZAHLEN ---
+        open_count = 0
+        for _tsk in sorted_tasks:
+            if not is_relevant(_tsk.get('betroffene_teams')): continue
+            _n = int((assign_df['task_id'] == _tsk['task_id']).sum()) if not assign_df.empty else 0
+            if _n < int(_tsk.get('max_helfer', 1) or 1): open_count += 1
+
+        next_ev_value, next_ev_caption = "–", "Kein Termin geplant"
+        if not events_df.empty:
+            _rel = events_df[events_df['betroffene_teams'].apply(is_relevant)].copy()
+            if not _rel.empty:
+                _rel['dt'] = pd.to_datetime(_rel['start_zeit'].astype(str).str.replace(' Uhr', '').str.replace(',', ''), dayfirst=True, errors='coerce')
+                _fut = _rel[_rel['dt'] >= pd.Timestamp.now()].sort_values('dt')
+                if not _fut.empty:
+                    next_ev_value = _fut.iloc[0]['dt'].strftime('%d.%m. · %H:%M')
+                    next_ev_caption = str(_fut.iloc[0]['titel'])
+
+        k1, k2, k3 = st.columns(3)
+        with k1:
+            with st.container(border=True):
+                st.metric("Deine Helferpunkte", f"{my_points}")
+                st.caption("inkl. deiner Kinder")
+        with k2:
+            with st.container(border=True):
+                st.metric("Offene Aufgaben", f"{open_count}")
+                st.caption("in deinen Teams")
+        with k3:
+            with st.container(border=True):
+                st.metric("Nächster Spieltag", next_ev_value)
+                st.caption(next_ev_caption)
+        st.write("")
         
         # --- HIGHLIGHT: FAHRER ---
-        st.markdown("### 🚗 Fahrer für Auswärtsspiele gesucht!")
+        section_title("🚗 Fahrer für Auswärtsspiele gesucht")
         found_driver_task = False
         for tsk in sorted_tasks:
             if not is_relevant(tsk.get('betroffene_teams')): continue
@@ -855,9 +887,9 @@ else:
                         with st.container(border=True):
                             c_info, c_action = st.columns([3, 2])
                             with c_info:
-                                st.error(f"**{tsk.get('event_titel', 'Event')}**")
+                                st.markdown(f"**{html.escape(str(tsk.get('event_titel', 'Event')))}** &nbsp;<span class=\"tub-badge\">Auswärts</span>", unsafe_allow_html=True)
                                 st.write(f"📍 **Ziel:** {tsk.get('event_ort', ort)} | 🗓️ {tsk['display_date']}")
-                                st.caption(f"Gesucht: {tsk['kategorie']} ({cur_h}/{max_h} belegt)")
+                                render_capacity(cur_h, max_h)
                             with c_action:
                                 options = {user['user_id']: "Ich fahre selbst"}
                                 if not children_df.empty:
@@ -899,96 +931,95 @@ else:
         if not overview_teams:
             overview_teams = []
             
-        overview_tabs_list = ["Alle"] + overview_teams
-        ov_tabs = st.tabs([f"🌍 Alle"] + [f"🏐 {t}" for t in overview_teams])
+        st.write("")
+        section_title("Aufgaben nach Team")
+        idx = 0
+        tab_name = st.pills("Team", ["Alle"] + overview_teams, default="Alle", key="ov_team", label_visibility="collapsed") or "Alle"
+        col1, col2 = st.columns(2)
         
-        for idx, tab_name in enumerate(overview_tabs_list):
-            with ov_tabs[idx]:
-                col1, col2 = st.columns(2)
+        with col1:
+            section_title("🚨 Hilfe gesucht")
+            found_open = False
+            
+            for tsk in sorted_tasks:
+                kategorie = str(tsk.get('kategorie', '')).lower()
+                if 'fahr' in kategorie or 'auto' in kategorie:
+                    if pd.notna(tsk.get('event_id')) and 'bocholt' not in tsk.get('ort', ''):
+                        continue
+                        
+                teams_str = str(tsk.get('betroffene_teams', ''))
                 
-                with col1:
-                    st.markdown("#### 🚨 Hilfe dringend gesucht")
-                    found_open = False
+                if tab_name != "Alle":
+                    if pd.isna(teams_str) or not teams_str.strip() or tab_name not in [t.strip() for t in teams_str.split(',')]:
+                        continue
+                else:
+                    if not is_relevant(teams_str): continue
                     
-                    for tsk in sorted_tasks:
-                        kategorie = str(tsk.get('kategorie', '')).lower()
-                        if 'fahr' in kategorie or 'auto' in kategorie:
-                            if pd.notna(tsk.get('event_id')) and 'bocholt' not in tsk.get('ort', ''):
-                                continue
-                                
-                        teams_str = str(tsk.get('betroffene_teams', ''))
+                t_id = tsk['task_id']
+                t_assigns = assign_df[assign_df['task_id'] == t_id] if not assign_df.empty else pd.DataFrame()
+                cur_h = len(t_assigns)
+                max_h = int(tsk.get('max_helfer', 1))
+                
+                if cur_h < max_h:
+                    found_open = True
+                    with st.container(border=True):
+                        st.markdown(f"**{html.escape(str(tsk['kategorie']))}** &nbsp;{points_badge(tsk.get('punkte', 1))}", unsafe_allow_html=True)
+                        st.caption(f"{tsk['context']} | 🗓️ {tsk['display_date']}")
+                        render_capacity(cur_h, max_h)
                         
-                        if tab_name != "Alle":
-                            if pd.isna(teams_str) or not teams_str.strip() or tab_name not in [t.strip() for t in teams_str.split(',')]:
-                                continue
+                        options = {user['user_id']: "Ich selbst"}
+                        if not children_df.empty:
+                            for _, child in children_df.iterrows(): options[child['user_id']] = f"Kind: {child['name']}"
+                        if not t_assigns.empty:
+                            options = {k: v for k, v in options.items() if k not in t_assigns['user_id'].tolist()}
+                        
+                        if options:
+                            render_task_accept_ui(tsk, options, key_prefix=f"dash_ov_{idx}")
                         else:
-                            if not is_relevant(teams_str): continue
+                            st.success("✅ Familie bereits eingetragen.")
                             
-                        t_id = tsk['task_id']
-                        t_assigns = assign_df[assign_df['task_id'] == t_id] if not assign_df.empty else pd.DataFrame()
-                        cur_h = len(t_assigns)
-                        max_h = int(tsk.get('max_helfer', 1))
-                        
-                        if cur_h < max_h:
-                            found_open = True
-                            with st.container(border=True):
-                                st.write(f"**{tsk['kategorie']}** (⭐ {tsk.get('punkte', 1)} Pkt.)")
-                                st.caption(f"{tsk['context']} | 🗓️ {tsk['display_date']}")
-                                st.write(f"👥 Belegt: {cur_h} / {max_h}")
-                                
-                                options = {user['user_id']: "Ich selbst"}
-                                if not children_df.empty:
-                                    for _, child in children_df.iterrows(): options[child['user_id']] = f"Kind: {child['name']}"
-                                if not t_assigns.empty:
-                                    options = {k: v for k, v in options.items() if k not in t_assigns['user_id'].tolist()}
-                                
-                                if options:
-                                    render_task_accept_ui(tsk, options, key_prefix=f"dash_ov_{idx}")
-                                else:
-                                    st.success("✅ Familie bereits eingetragen.")
-                                    
-                    if not found_open:
-                        st.success("In diesem Bereich sind aktuell alle Aufgaben belegt. Super!")
+            if not found_open:
+                st.success("In diesem Bereich sind aktuell alle Aufgaben belegt. Super!")
 
-                with col2:
-                    st.markdown("#### ✅ Deine übernommenen Aufgaben")
-                    found_mine = False
+        with col2:
+            section_title("✅ Deine Aufgaben")
+            found_mine = False
+            
+            if my_assigned_tids:
+                for t_id in my_assigned_tids:
+                    tsk = next((item for item in sorted_tasks if item["task_id"] == t_id), None)
+                    if not tsk: continue
                     
-                    if my_assigned_tids:
-                        for t_id in my_assigned_tids:
-                            tsk = next((item for item in sorted_tasks if item["task_id"] == t_id), None)
-                            if not tsk: continue
-                            
-                            teams_str = str(tsk.get('betroffene_teams', ''))
-                            if tab_name != "Alle":
-                                if pd.isna(teams_str) or not teams_str.strip() or tab_name not in [t.strip() for t in teams_str.split(',')]:
-                                    continue
-                            else:
-                                if not is_relevant(teams_str): continue
-                                
-                            found_mine = True
-                            fam_assigns = assign_df[(assign_df['task_id'] == t_id) & (assign_df['user_id'].isin(my_family_uids))]
-                            
-                            with st.container(border=True):
-                                st.write(f"**{tsk['kategorie']}** (⭐ {tsk.get('punkte', 1)} Pkt.)")
-                                st.caption(f"{tsk['context']} | 🗓️ {tsk['display_date']}")
-                                
-                                for _, assign_row in fam_assigns.iterrows():
-                                    c1_sub, c2_sub = st.columns([3, 1])
-                                    with c1_sub:
-                                        st.write(f"👷‍♂️ {format_assignee_name(assign_row)}")
-                                    with c2_sub:
-                                        if st.button("Abgeben", key=f"cancel_{t_id}_{assign_row['user_id']}_tab_{idx}", use_container_width=True):
-                                            confirm_cancel(t_id, assign_row['user_id'], tsk['kategorie'], assign_row['assignee_name'])
+                    teams_str = str(tsk.get('betroffene_teams', ''))
+                    if tab_name != "Alle":
+                        if pd.isna(teams_str) or not teams_str.strip() or tab_name not in [t.strip() for t in teams_str.split(',')]:
+                            continue
+                    else:
+                        if not is_relevant(teams_str): continue
+                        
+                    found_mine = True
+                    fam_assigns = assign_df[(assign_df['task_id'] == t_id) & (assign_df['user_id'].isin(my_family_uids))]
                     
-                    if not found_mine:
-                        st.info("Du bist in dieser Ansicht aktuell für keine anstehenden Aufgaben eingetragen.")
+                    with st.container(border=True):
+                        st.markdown(f"**{html.escape(str(tsk['kategorie']))}** &nbsp;{points_badge(tsk.get('punkte', 1))}", unsafe_allow_html=True)
+                        st.caption(f"{tsk['context']} | 🗓️ {tsk['display_date']}")
+                        
+                        for _, assign_row in fam_assigns.iterrows():
+                            c1_sub, c2_sub = st.columns([3, 1])
+                            with c1_sub:
+                                st.write(f"👷‍♂️ {format_assignee_name(assign_row)}")
+                            with c2_sub:
+                                if st.button("Abgeben", key=f"cancel_{t_id}_{assign_row['user_id']}_tab_{idx}", use_container_width=True):
+                                    confirm_cancel(t_id, assign_row['user_id'], tsk['kategorie'], assign_row['assignee_name'])
+            
+            if not found_mine:
+                st.info("Du bist in dieser Ansicht aktuell für keine anstehenden Aufgaben eingetragen.")
 
     # ----------------------------------------------------
     # TAB 1: SPIELTAGE & EVENTS
     # ----------------------------------------------------
-    with tab_events:
-        st.write("Wähle eine Altersklasse/ein Team, um die Termine zu sehen.")
+    def page_events():
+        st.caption("Wähle ein Team, um seine Termine, Rückmeldungen und Aufgaben zu sehen.")
         
         rel_events = events_df[events_df['betroffene_teams'].apply(is_relevant)] if not events_df.empty else pd.DataFrame()
         
@@ -1050,10 +1081,10 @@ else:
                             
                             tc1, tc2 = st.columns([3, 2])
                             with tc1:
-                                st.write(f"**{tsk['kategorie']}** (⭐ {tsk.get('punkte', 1)} Pkt.)")
+                                st.markdown(f"**{html.escape(str(tsk['kategorie']))}** &nbsp;{points_badge(tsk.get('punkte', 1))}", unsafe_allow_html=True)
                                 st.caption(tsk['beschreibung'])
                                 formatted_names = [format_assignee_name(row) for _, row in t_assigns.iterrows()]
-                                st.write(f"👥 Belegt: {cur_h} / {max_h}. " + ", ".join(formatted_names))
+                                render_capacity(cur_h, max_h, formatted_names)
                                 
                             with tc2:
                                 options = {user['user_id']: "Ich selbst"}
@@ -1094,65 +1125,57 @@ else:
                             delete_event(ev_id); st.rerun()
 
         if not rel_events.empty:
-            if st.session_state['selected_event_team'] is None:
-                available_teams = set()
-                for _, ev in rel_events.iterrows():
-                    if pd.notna(ev['betroffene_teams']): available_teams.update([t.strip() for t in str(ev['betroffene_teams']).split(',')])
-                valid_teams = sorted(list(available_teams))
-                
-                if valid_teams:
-                    cols = st.columns(3)
-                    for i, t_name in enumerate(valid_teams):
-                        with cols[i % 3]:
-                            if st.button(f"🏐 {t_name}", key=f"tile_{t_name}", use_container_width=True):
-                                st.session_state['selected_event_team'] = t_name
-                                st.rerun()
-                else: st.info("Keine spezifischen Teams in den Spieltagen hinterlegt.")
+            available_teams = set()
+            for _, ev in rel_events.iterrows():
+                if pd.notna(ev['betroffene_teams']):
+                    available_teams.update([t.strip() for t in str(ev['betroffene_teams']).split(',') if t.strip()])
+            valid_teams = sorted(list(available_teams))
+
+            if not valid_teams:
+                st.info("Keine spezifischen Teams in den Spieltagen hinterlegt.")
             else:
-                sel_team = st.session_state['selected_event_team']
-                col_back, col_title = st.columns([1, 4])
-                with col_back:
-                    if st.button("🔙 Zurück", use_container_width=True):
-                        st.session_state['selected_event_team'] = None
-                        st.rerun()
-                with col_title: st.markdown(f"### Termine für: **{sel_team}**")
-                
-                def is_selected_team(teams_str):
-                    if pd.isna(teams_str): return False
-                    return sel_team in [t.strip() for t in str(teams_str).split(',')]
+                default_team = next((t for t in valid_teams if t in my_teams), None)
+                sel_team = st.pills("Team", valid_teams, default=default_team, key="ev_team", label_visibility="collapsed")
+                if not sel_team:
+                    st.info("Wähle oben ein Team aus.")
+                else:
+                    section_title(f"Termine für {sel_team}")
+                    def is_selected_team(teams_str):
+                        if pd.isna(teams_str): return False
+                        return sel_team in [t.strip() for t in str(teams_str).split(',')]
                     
-                team_events = rel_events[rel_events['betroffene_teams'].apply(is_selected_team)].copy()
+                    team_events = rel_events[rel_events['betroffene_teams'].apply(is_selected_team)].copy()
                 
-                if not team_events.empty:
-                    team_events['sort_date'] = pd.to_datetime(team_events['start_zeit'].astype(str).str.replace(' Uhr', ''), dayfirst=True, errors='coerce')
-                    now = pd.Timestamp(datetime.datetime.now())
-                    future_events = team_events[team_events['sort_date'] >= now].sort_values('sort_date')
-                    past_events = team_events[team_events['sort_date'] < now].sort_values('sort_date', ascending=False)
-                    unparsed_events = team_events[team_events['sort_date'].isna()]
+                    if not team_events.empty:
+                        team_events['sort_date'] = pd.to_datetime(team_events['start_zeit'].astype(str).str.replace(' Uhr', ''), dayfirst=True, errors='coerce')
+                        now = pd.Timestamp(datetime.datetime.now())
+                        future_events = team_events[team_events['sort_date'] >= now].sort_values('sort_date')
+                        past_events = team_events[team_events['sort_date'] < now].sort_values('sort_date', ascending=False)
+                        unparsed_events = team_events[team_events['sort_date'].isna()]
                     
-                    if not future_events.empty:
-                        next_date = future_events.iloc[0]['sort_date'].date()
-                        next_events = future_events[future_events['sort_date'].dt.date == next_date]
-                        upcoming_events = future_events[future_events['sort_date'].dt.date > next_date]
+                        if not future_events.empty:
+                            next_date = future_events.iloc[0]['sort_date'].date()
+                            next_events = future_events[future_events['sort_date'].dt.date == next_date]
+                            upcoming_events = future_events[future_events['sort_date'].dt.date > next_date]
                         
-                        st.markdown("#### 🚨 Findet als nächstes statt")
-                        render_event_list(next_events)
-                        if not upcoming_events.empty:
-                            st.markdown("#### 📅 Kommende Termine")
-                            render_event_list(upcoming_events)
-                    else: st.success("Keine anstehenden Termine in der Zukunft!")
+                            section_title("Als Nächstes")
+                            render_event_list(next_events)
+                            if not upcoming_events.empty:
+                                section_title("Kommende Termine")
+                                render_event_list(upcoming_events)
+                        else: st.success("Keine anstehenden Termine in der Zukunft!")
                         
-                    if not past_events.empty or not unparsed_events.empty:
-                        with st.expander("🕰️ Vergangene / Unbestimmte Termine"):
-                            if not past_events.empty: render_event_list(past_events)
-                            if not unparsed_events.empty: render_event_list(unparsed_events)
-                else: st.info("Für dieses Team wurden noch keine Spieltage angelegt.")
+                        if not past_events.empty or not unparsed_events.empty:
+                            with st.expander("🕰️ Vergangene / Unbestimmte Termine"):
+                                if not past_events.empty: render_event_list(past_events)
+                                if not unparsed_events.empty: render_event_list(unparsed_events)
+                    else: st.info("Für dieses Team wurden noch keine Spieltage angelegt.")
         else: st.info("Keine Spieltage für deine Teams gefunden.")
 
     # ----------------------------------------------------
     # TAB 2: FREIE AUFGABEN
     # ----------------------------------------------------
-    with tab_tasks:
+    def page_tasks():
         if user['rolle'] in ['Admin', 'Organisator', 'Trainer']:
             with st.expander("➕ Allgemeine Aufgabe anlegen (Ohne Event-Bezug)"):
                 with st.form("new_task_form"):
@@ -1185,13 +1208,13 @@ else:
                 with st.container():
                     col1, col2 = st.columns([3, 2])
                     with col1:
-                        st.write(f"**{row['kategorie']}** (⭐ {row.get('punkte', 1)} Pkt.)")
+                        st.markdown(f"**{html.escape(str(row['kategorie']))}** &nbsp;{points_badge(row.get('punkte', 1))}", unsafe_allow_html=True)
                         if pd.notna(row.get('start_zeit')): st.write(f"🗓️ {row['start_zeit']}")
                         if pd.notna(row.get('betroffene_teams')) and row['betroffene_teams']: st.write(f"👕 Teams: {row['betroffene_teams']}")
                         st.caption(row['beschreibung'])
                         
                         formatted_names = [format_assignee_name(r) for _, r in t_assigns.iterrows()]
-                        st.write(f"👥 Belegt: {cur_h}/{max_h}. " + ", ".join(formatted_names))
+                        render_capacity(cur_h, max_h, formatted_names)
                         
                     with col2:
                         options = {user['user_id']: "Ich selbst"}
@@ -1213,92 +1236,91 @@ else:
     # ----------------------------------------------------
     # TAB 3: KALENDER (Nicht für Elternteile)
     # ----------------------------------------------------
-    if tab_calendar is not None:
-        with tab_calendar:
-            st.write("Chronologische Übersicht aller relevanten Termine in einem interaktiven Kalender.")
+    def page_calendar():
+        st.write("Chronologische Übersicht aller relevanten Termine in einem interaktiven Kalender.")
             
-            filter_optionen = ["Alle meine Teams"] + TEAM_LISTE
-            selected_cal_team = st.selectbox("Kalender filtern nach Team:", filter_optionen)
+        filter_optionen = ["Alle meine Teams"] + TEAM_LISTE
+        selected_cal_team = st.selectbox("Kalender filtern nach Team:", filter_optionen)
             
-            def cal_is_relevant(teams_str):
-                if selected_cal_team == "Alle meine Teams": return is_relevant(teams_str)
-                else:
-                    if pd.isna(teams_str) or not str(teams_str).strip(): return False
-                    return selected_cal_team in [t.strip() for t in str(teams_str).split(',')]
+        def cal_is_relevant(teams_str):
+            if selected_cal_team == "Alle meine Teams": return is_relevant(teams_str)
+            else:
+                if pd.isna(teams_str) or not str(teams_str).strip(): return False
+                return selected_cal_team in [t.strip() for t in str(teams_str).split(',')]
 
-            def parse_to_iso(date_str):
-                if pd.isna(date_str) or not str(date_str).strip(): return None
-                try:
-                    clean_str = str(date_str).replace(' Uhr', '').strip()
-                    dt = pd.to_datetime(clean_str, dayfirst=True, errors='coerce')
-                    if pd.isna(dt): return None
-                    return dt.isoformat()
-                except: return None
+        def parse_to_iso(date_str):
+            if pd.isna(date_str) or not str(date_str).strip(): return None
+            try:
+                clean_str = str(date_str).replace(' Uhr', '').strip()
+                dt = pd.to_datetime(clean_str, dayfirst=True, errors='coerce')
+                if pd.isna(dt): return None
+                return dt.isoformat()
+            except: return None
 
-            calendar_events = []
+        calendar_events = []
             
-            if not events_df.empty:
-                for _, ev in events_df[events_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
-                    start_iso = parse_to_iso(ev['start_zeit'])
-                    end_iso = parse_to_iso(ev.get('ende_zeit'))
-                    if start_iso:
-                        calendar_events.append({
-                            "title": f"🏆 {ev['titel']} ({ev['betroffene_teams']})",
-                            "start": start_iso,
-                            "end": end_iso if end_iso else start_iso,
-                            "backgroundColor": "#82368c",  
-                            "borderColor": "#82368c"
-                        })
+        if not events_df.empty:
+            for _, ev in events_df[events_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
+                start_iso = parse_to_iso(ev['start_zeit'])
+                end_iso = parse_to_iso(ev.get('ende_zeit'))
+                if start_iso:
+                    calendar_events.append({
+                        "title": f"🏆 {ev['titel']} ({ev['betroffene_teams']})",
+                        "start": start_iso,
+                        "end": end_iso if end_iso else start_iso,
+                        "backgroundColor": "#82368c",  
+                        "borderColor": "#82368c"
+                    })
                         
-            if not tasks_df.empty:
-                for _, tk in tasks_df[tasks_df['event_id'].isna() & tasks_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
-                    start_iso = parse_to_iso(tk.get('start_zeit'))
-                    if start_iso:
-                        icon = "🧑‍⚖️" if "schiedsgericht" in str(tk['kategorie']).lower() else "📋"
+        if not tasks_df.empty:
+            for _, tk in tasks_df[tasks_df['event_id'].isna() & tasks_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
+                start_iso = parse_to_iso(tk.get('start_zeit'))
+                if start_iso:
+                    icon = "🧑‍⚖️" if "schiedsgericht" in str(tk['kategorie']).lower() else "📋"
                         
-                        calendar_events.append({
-                            "title": f"{icon} {tk['kategorie']} ({tk.get('betroffene_teams', 'Alle')})",
-                            "start": start_iso,
-                            "end": start_iso,
-                            "backgroundColor": "#5f5f5f",  
-                            "borderColor": "#5f5f5f",
-                            "textColor": "#ffffff"
-                        })
+                    calendar_events.append({
+                        "title": f"{icon} {tk['kategorie']} ({tk.get('betroffene_teams', 'Alle')})",
+                        "start": start_iso,
+                        "end": start_iso,
+                        "backgroundColor": "#5f5f5f",  
+                        "borderColor": "#5f5f5f",
+                        "textColor": "#ffffff"
+                    })
                         
-            if calendar_events:
-                calendar_options = {
-                    "headerToolbar": {
-                        "left": "today prev,next",
-                        "center": "title",
-                        "right": "dayGridMonth,timeGridWeek,listMonth",
-                    },
-                    "initialView": "dayGridMonth",
-                    "navLinks": True,
-                    "locale": "de",
-                    "firstDay": 1, 
-                    "buttonText": {
-                        "today": "Heute",
-                        "month": "Monat",
-                        "week": "Woche",
-                        "list": "Liste"
-                    }
+        if calendar_events:
+            calendar_options = {
+                "headerToolbar": {
+                    "left": "today prev,next",
+                    "center": "title",
+                    "right": "dayGridMonth,timeGridWeek,listMonth",
+                },
+                "initialView": "dayGridMonth",
+                "navLinks": True,
+                "locale": "de",
+                "firstDay": 1, 
+                "buttonText": {
+                    "today": "Heute",
+                    "month": "Monat",
+                    "week": "Woche",
+                    "list": "Liste"
                 }
+            }
                 
-                custom_css = """
-                    .fc-event-title { font-weight: 600; font-size: 0.85em; white-space: normal; }
-                    .fc-toolbar-title { font-size: 1.2rem !important; }
-                    .fc-button { border-radius: 6px !important; }
-                    .fc-theme-standard .fc-scrollgrid { border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
-                """
+            custom_css = """
+                .fc-event-title { font-weight: 600; font-size: 0.85em; white-space: normal; }
+                .fc-toolbar-title { font-size: 1.2rem !important; }
+                .fc-button { border-radius: 6px !important; }
+                .fc-theme-standard .fc-scrollgrid { border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
+            """
                 
-                calendar(events=calendar_events, options=calendar_options, custom_css=custom_css, key=f"cal_{selected_cal_team}")
-            else: 
-                st.info("Keine Einträge im Kalender für diesen Filter.")
+            calendar(events=calendar_events, options=calendar_options, custom_css=custom_css, key=f"cal_{selected_cal_team}")
+        else: 
+            st.info("Keine Einträge im Kalender für diesen Filter.")
 
     # ----------------------------------------------------
     # TAB 4: FAMILIE
     # ----------------------------------------------------
-    with tab_family:
+    def page_family():
         with st.form("add_c"):
             c1, c2 = st.columns(2)
             with c1: cn = st.text_input("Name Kind")
@@ -1316,108 +1338,140 @@ else:
     # ----------------------------------------------------
     # TAB 5: PUNKTE & AUSWERTUNG (Trainer, Organisatoren, Admin)
     # ----------------------------------------------------
-    if tab_stats is not None:
-        with tab_stats:
-            st.subheader("📊 Helferpunkte der Elternteile")
-            st.write("Hier siehst du, wie viele Punkte die jeweiligen Elternteile durch übernommene Aufgaben gesammelt haben.")
+    def page_stats():
+        st.subheader("📊 Helferpunkte der Elternteile")
+        st.write("Hier siehst du, wie viele Punkte die jeweiligen Elternteile durch übernommene Aufgaben gesammelt haben.")
             
-            if not points_df.empty:
-                eltern_df = points_df[points_df['rolle'] == 'Elternteil'].copy()
+        if not points_df.empty:
+            eltern_df = points_df[points_df['rolle'] == 'Elternteil'].copy()
                 
-                if user['rolle'] == 'Trainer' and user.get('team') and user['team'] != "Kein Team":
-                    trainer_teams = [t.strip() for t in user['team'].split(',')]
-                    st.caption(f"Dein Trainer-Team-Filter: **{', '.join(trainer_teams)}**")
-                    eltern_df = eltern_df[eltern_df['team'].apply(lambda t: any(team in str(t) for team in trainer_teams))]
+            if user['rolle'] == 'Trainer' and user.get('team') and user['team'] != "Kein Team":
+                trainer_teams = [t.strip() for t in user['team'].split(',')]
+                st.caption(f"Dein Trainer-Team-Filter: **{', '.join(trainer_teams)}**")
+                eltern_df = eltern_df[eltern_df['team'].apply(lambda t: any(team in str(t) for team in trainer_teams))]
                 
-                if not eltern_df.empty:
-                    display_df = eltern_df[['name', 'team', 'gesamt_punkte']].rename(
-                        columns={'name': 'Elternteil', 'team': 'Zugeordnete Teams', 'gesamt_punkte': 'Gesammelte Punkte'}
-                    ).sort_values(by='Gesammelte Punkte', ascending=False)
+            if not eltern_df.empty:
+                display_df = eltern_df[['name', 'team', 'gesamt_punkte']].rename(
+                    columns={'name': 'Elternteil', 'team': 'Zugeordnete Teams', 'gesamt_punkte': 'Gesammelte Punkte'}
+                ).sort_values(by='Gesammelte Punkte', ascending=False)
                     
-                    st.dataframe(display_df, use_container_width=True, hide_index=True)
-                else:
-                    st.info("Keine Elternteile für diese Auswahl gefunden.")
+                st.dataframe(display_df, use_container_width=True, hide_index=True)
             else:
-                st.info("Noch keine Punkteeinträge vorhanden.")
+                st.info("Keine Elternteile für diese Auswahl gefunden.")
+        else:
+            st.info("Noch keine Punkteeinträge vorhanden.")
 
     # ----------------------------------------------------
     # TAB 6: ADMIN
     # ----------------------------------------------------
-    if tab_admin is not None:
-        with tab_admin:
-            st.subheader("🚨 Spielplan zurücksetzen (Massen-Löschen)")
-            st.write("Lösche alle Termine eines Teams, bevor du einen aktualisierten Spielplan hochlädst, um doppelte Einträge zu vermeiden.")
-            with st.form("delete_team_events"):
-                del_team = st.selectbox("Welches Team soll zurückgesetzt werden?", TEAM_LISTE)
-                confirm_del = st.checkbox("Ja, ich möchte alle Termine, Aufgaben und Rückmeldungen dieses Teams unwiderruflich löschen.")
-                if st.form_submit_button("Spielplan löschen"):
-                    if confirm_del:
-                        succ, msg = delete_all_events_for_team(del_team)
-                        if succ: 
-                            st.success(msg)
-                            st.rerun()
-                        else: 
-                            st.error(msg)
-                    else:
-                        st.warning("Bitte bestätige den Löschvorgang mit dem Häkchen.")
+    def page_admin():
+        st.subheader("🚨 Spielplan zurücksetzen (Massen-Löschen)")
+        st.write("Lösche alle Termine eines Teams, bevor du einen aktualisierten Spielplan hochlädst, um doppelte Einträge zu vermeiden.")
+        with st.form("delete_team_events"):
+            del_team = st.selectbox("Welches Team soll zurückgesetzt werden?", TEAM_LISTE)
+            confirm_del = st.checkbox("Ja, ich möchte alle Termine, Aufgaben und Rückmeldungen dieses Teams unwiderruflich löschen.")
+            if st.form_submit_button("Spielplan löschen"):
+                if confirm_del:
+                    succ, msg = delete_all_events_for_team(del_team)
+                    if succ: 
+                        st.success(msg)
+                        st.rerun()
+                    else: 
+                        st.error(msg)
+                else:
+                    st.warning("Bitte bestätige den Löschvorgang mit dem Häkchen.")
             
-            st.divider()
+        st.divider()
             
-            st.subheader("📅 Spielplan-Import (SAMS CSV)")
-            st.write("Lade hier den Spielplan als **CSV-Datei** aus SAMS hoch. Wenn TuB Bocholt als Schiedsgericht eingeteilt ist, wird automatisch eine entsprechende Aufgabe angelegt!")
-            with st.form("csv_import"):
-                csv_file = st.file_uploader("SAMS CSV-Datei auswählen", type=["csv"])
-                target_team = st.multiselect("Für welches Team gilt dieser Spielplan?", TEAM_LISTE)
-                if st.form_submit_button("Spielplan importieren"):
-                    if csv_file and target_team:
-                        succ, msg = parse_and_import_csv(csv_file.read(), ", ".join(target_team))
-                        if succ: st.success(msg)
-                        else: st.error(msg)
-                    else: st.warning("Bitte Datei und Team wählen.")
+        st.subheader("📅 Spielplan-Import (SAMS CSV)")
+        st.write("Lade hier den Spielplan als **CSV-Datei** aus SAMS hoch. Wenn TuB Bocholt als Schiedsgericht eingeteilt ist, wird automatisch eine entsprechende Aufgabe angelegt!")
+        with st.form("csv_import"):
+            csv_file = st.file_uploader("SAMS CSV-Datei auswählen", type=["csv"])
+            target_team = st.multiselect("Für welches Team gilt dieser Spielplan?", TEAM_LISTE)
+            if st.form_submit_button("Spielplan importieren"):
+                if csv_file and target_team:
+                    succ, msg = parse_and_import_csv(csv_file.read(), ", ".join(target_team))
+                    if succ: st.success(msg)
+                    else: st.error(msg)
+                else: st.warning("Bitte Datei und Team wählen.")
                     
-            st.divider()
-            st.subheader("👥 User-Verwaltung")
-            st.dataframe(all_users_df, use_container_width=True)
+        st.divider()
+        st.subheader("👥 User-Verwaltung")
+        st.dataframe(all_users_df, use_container_width=True)
             
-            st.divider()
-            st.subheader("🎭 Rollen vergeben")
-            st.write("Trainer, Organisatoren und weitere Admins können sich nicht selbst registrieren. Hier vergibst du diese Rollen.")
-            if not all_users_df.empty:
-                with st.form("role_form"):
-                    erwachsene = all_users_df[all_users_df['rolle'] != 'Kind']
-                    opts_r = {r['user_id']: f"{r['name']} ({r['rolle']})" for _, r in erwachsene.iterrows()}
-                    role_uid = st.selectbox("Benutzer", list(opts_r.keys()), format_func=lambda x: opts_r[x])
-                    new_role = st.selectbox("Neue Rolle", VERGEBBARE_ROLLEN)
-                    if st.form_submit_button("Rolle speichern"):
-                        if role_uid == user['user_id'] and new_role != 'Admin':
-                            st.warning("Du kannst dir nicht selbst die Admin-Rolle entziehen.")
-                        else:
-                            ok, msg = set_user_role(role_uid, new_role)
-                            if ok:
-                                st.success(msg)
-                            else:
-                                st.error(msg)
-            
-            st.divider()
-            st.subheader("🔑 Passwort zurücksetzen")
-            st.write("Vergib hier ein neues Passwort für Nutzer, die ihres vergessen haben.")
-            with st.form("reset_pw_form"):
-                opts = {r['user_id']: f"{r['name']} ({r['email']})" for _, r in all_users_df.iterrows()}
-                reset_id = st.selectbox("Benutzer auswählen:", list(opts.keys()), format_func=lambda x: opts[x])
-                new_pw = st.text_input("Neues Passwort", type="password")
-                
-                if st.form_submit_button("Passwort überschreiben"):
-                    if len(new_pw.strip()) < MIN_PW_LENGTH:
-                        st.warning(f"Bitte ein Passwort mit mindestens {MIN_PW_LENGTH} Zeichen eingeben.")
+        st.divider()
+        st.subheader("🎭 Rollen vergeben")
+        st.write("Trainer, Organisatoren und weitere Admins können sich nicht selbst registrieren. Hier vergibst du diese Rollen.")
+        if not all_users_df.empty:
+            with st.form("role_form"):
+                erwachsene = all_users_df[all_users_df['rolle'] != 'Kind']
+                opts_r = {r['user_id']: f"{r['name']} ({r['rolle']})" for _, r in erwachsene.iterrows()}
+                role_uid = st.selectbox("Benutzer", list(opts_r.keys()), format_func=lambda x: opts_r[x])
+                new_role = st.selectbox("Neue Rolle", VERGEBBARE_ROLLEN)
+                if st.form_submit_button("Rolle speichern"):
+                    if role_uid == user['user_id'] and new_role != 'Admin':
+                        st.warning("Du kannst dir nicht selbst die Admin-Rolle entziehen.")
                     else:
-                        succ, msg = reset_password(reset_id, new_pw)
-                        if succ: 
-                            st.success(f"{msg} Der Nutzer kann sich nun mit dem neuen Passwort einloggen.")
-                        else: 
+                        ok, msg = set_user_role(role_uid, new_role)
+                        if ok:
+                            st.success(msg)
+                        else:
                             st.error(msg)
+            
+        st.divider()
+        st.subheader("🔑 Passwort zurücksetzen")
+        st.write("Vergib hier ein neues Passwort für Nutzer, die ihres vergessen haben.")
+        with st.form("reset_pw_form"):
+            opts = {r['user_id']: f"{r['name']} ({r['email']})" for _, r in all_users_df.iterrows()}
+            reset_id = st.selectbox("Benutzer auswählen:", list(opts.keys()), format_func=lambda x: opts[x])
+            new_pw = st.text_input("Neues Passwort", type="password")
+                
+            if st.form_submit_button("Passwort überschreiben"):
+                if len(new_pw.strip()) < MIN_PW_LENGTH:
+                    st.warning(f"Bitte ein Passwort mit mindestens {MIN_PW_LENGTH} Zeichen eingeben.")
+                else:
+                    succ, msg = reset_password(reset_id, new_pw)
+                    if succ: 
+                        st.success(f"{msg} Der Nutzer kann sich nun mit dem neuen Passwort einloggen.")
+                    else: 
+                        st.error(msg)
 
-            with st.form("del_u"):
-                opts = {r['user_id']: f"{r['name']} ({r['rolle']})" for _, r in all_users_df.iterrows()}
-                d_id = st.selectbox("Löschen:", list(opts.keys()), format_func=lambda x: opts[x])
-                if st.form_submit_button("User Löschen") and d_id != user['user_id']:
-                    delete_user(d_id); st.rerun()
+        with st.form("del_u"):
+            opts = {r['user_id']: f"{r['name']} ({r['rolle']})" for _, r in all_users_df.iterrows()}
+            d_id = st.selectbox("Löschen:", list(opts.keys()), format_func=lambda x: opts[x])
+            if st.form_submit_button("User Löschen") and d_id != user['user_id']:
+                delete_user(d_id); st.rerun()
+
+    # ----------------------------------------------------
+    # NAVIGATION (Seitenleiste) – nur erlaubte Seiten werden angeboten
+    # ----------------------------------------------------
+    pages = [
+        st.Page(page_overview, title="Übersicht", icon=":material/home:", url_path="uebersicht", default=True),
+        st.Page(page_events, title="Spieltage", icon=":material/sports_volleyball:", url_path="spieltage"),
+        st.Page(page_tasks, title="Freie Aufgaben", icon=":material/task_alt:", url_path="aufgaben"),
+    ]
+    if user['rolle'] != 'Elternteil':
+        pages.append(st.Page(page_calendar, title="Kalender", icon=":material/calendar_month:", url_path="kalender"))
+    pages.append(st.Page(page_family, title="Familie", icon=":material/family_restroom:", url_path="familie"))
+    if user['rolle'] in ['Admin', 'Organisator', 'Trainer']:
+        pages.append(st.Page(page_stats, title="Punkte & Auswertung", icon=":material/leaderboard:", url_path="punkte"))
+    if user['rolle'] == 'Admin':
+        pages.append(st.Page(page_admin, title="Admin", icon=":material/admin_panel_settings:", url_path="admin"))
+
+    nav = st.navigation(pages, position="sidebar")
+
+    with st.sidebar:
+        st.markdown(f"""
+        <div class="tub-user">
+            <div class="name">{html.escape(str(user['name']))}</div>
+            <div class="role">{html.escape(str(user['rolle']))}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.write("")
+        if st.button("Ausloggen", icon=":material/logout:", use_container_width=True):
+            st.session_state['logged_in_user'] = None
+            st.rerun()
+
+    nav.run()
+
+render_footer()
