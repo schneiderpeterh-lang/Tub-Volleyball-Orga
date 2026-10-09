@@ -65,7 +65,7 @@ with st.sidebar:
         """)
         
     st.divider()
-    st.caption("App-Version 3.2 (Sicherheits-Update) | Status: Online 🟢")
+    st.caption("App-Version 3.3 (Vereinsfarben) | Status: Online 🟢")
 
 def inject_custom_css():
     st.markdown("""
@@ -94,8 +94,8 @@ def inject_custom_css():
         transition: background-color 0.3s ease;
     }
     .stTabs [aria-selected="true"] {
-        background-color: rgba(28, 131, 225, 0.1); 
-        border-bottom: 3px solid #1c83e1;
+        background-color: rgba(130, 54, 140, 0.10); 
+        border-bottom: 3px solid #82368c;
     }
     
     div[data-testid="stContainer"] {
@@ -103,7 +103,7 @@ def inject_custom_css():
         transition: all 0.3s ease;
     }
     div[data-testid="stContainer"]:hover {
-        border-color: #1c83e1; 
+        border-color: #82368c; 
     }
     </style>
     """, unsafe_allow_html=True)
@@ -1246,8 +1246,8 @@ else:
                             "title": f"🏆 {ev['titel']} ({ev['betroffene_teams']})",
                             "start": start_iso,
                             "end": end_iso if end_iso else start_iso,
-                            "backgroundColor": "#1c83e1",  
-                            "borderColor": "#1c83e1"
+                            "backgroundColor": "#82368c",  
+                            "borderColor": "#82368c"
                         })
                         
             if not tasks_df.empty:
@@ -1260,9 +1260,9 @@ else:
                             "title": f"{icon} {tk['kategorie']} ({tk.get('betroffene_teams', 'Alle')})",
                             "start": start_iso,
                             "end": start_iso,
-                            "backgroundColor": "#f9ab00",  
-                            "borderColor": "#f9ab00",
-                            "textColor": "#000000"
+                            "backgroundColor": "#5f5f5f",  
+                            "borderColor": "#5f5f5f",
+                            "textColor": "#ffffff"
                         })
                         
             if calendar_events:
