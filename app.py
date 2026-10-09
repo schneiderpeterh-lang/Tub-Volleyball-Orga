@@ -35,7 +35,7 @@ MIN_PW_LENGTH = 8
 # ==========================================
 st.set_page_config(page_title="TuB Helfer-Orga", page_icon="🏐", layout="wide", initial_sidebar_state="auto")
 
-APP_VERSION = "4.0 (Neues Design)"
+APP_VERSION = "4.1 (Kalender fürs Handy)"
 BRAND = "#82368c"        # Vereinslila (aus tub-bocholt.de)
 BRAND_DARK = "#5e2766"
 LOGO_PATH = "logo.png"   # optional: Vereinslogo als logo.png ins Repo legen
@@ -1237,85 +1237,166 @@ else:
     # TAB 3: KALENDER (Nicht für Elternteile)
     # ----------------------------------------------------
     def page_calendar():
-        st.write("Chronologische Übersicht aller relevanten Termine in einem interaktiven Kalender.")
-            
-        filter_optionen = ["Alle meine Teams"] + TEAM_LISTE
-        selected_cal_team = st.selectbox("Kalender filtern nach Team:", filter_optionen)
-            
+        st.caption("Alle Termine deiner Teams. Auf dem Handy ist die Liste am übersichtlichsten.")
+
+        team_filter = st.pills("Team", ["Meine Teams"] + TEAM_LISTE, default="Meine Teams",
+                               key="cal_team", label_visibility="collapsed") or "Meine Teams"
+        view = st.segmented_control("Ansicht", ["Liste", "Monat"], default="Liste",
+                                    key="cal_view", label_visibility="collapsed") or "Liste"
+
         def cal_is_relevant(teams_str):
-            if selected_cal_team == "Alle meine Teams": return is_relevant(teams_str)
-            else:
-                if pd.isna(teams_str) or not str(teams_str).strip(): return False
-                return selected_cal_team in [t.strip() for t in str(teams_str).split(',')]
+            if team_filter == "Meine Teams":
+                return is_relevant(teams_str)
+            if pd.isna(teams_str) or not str(teams_str).strip():
+                return False
+            return team_filter in [t.strip() for t in str(teams_str).split(',')]
 
-        def parse_to_iso(date_str):
-            if pd.isna(date_str) or not str(date_str).strip(): return None
-            try:
-                clean_str = str(date_str).replace(' Uhr', '').strip()
-                dt = pd.to_datetime(clean_str, dayfirst=True, errors='coerce')
-                if pd.isna(dt): return None
-                return dt.isoformat()
-            except: return None
+        def to_ts(date_str):
+            if date_str is None or pd.isna(date_str) or not str(date_str).strip():
+                return None
+            ts = pd.to_datetime(str(date_str).replace(' Uhr', '').replace(',', '').strip(), dayfirst=True, errors='coerce')
+            return None if pd.isna(ts) else ts
 
-        calendar_events = []
-            
+        # ---- Einträge sammeln (Spieltage + freie Aufgaben) ----
+        entries = []
         if not events_df.empty:
             for _, ev in events_df[events_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
-                start_iso = parse_to_iso(ev['start_zeit'])
-                end_iso = parse_to_iso(ev.get('ende_zeit'))
-                if start_iso:
-                    calendar_events.append({
-                        "title": f"🏆 {ev['titel']} ({ev['betroffene_teams']})",
-                        "start": start_iso,
-                        "end": end_iso if end_iso else start_iso,
-                        "backgroundColor": "#82368c",  
-                        "borderColor": "#82368c"
-                    })
-                        
+                ts = to_ts(ev['start_zeit'])
+                if ts is None: continue
+                entries.append({
+                    "id": f"ev{ev['event_id']}", "ts": ts, "end": to_ts(ev.get('ende_zeit')),
+                    "art": "Spieltag", "titel": str(ev['titel']),
+                    "teams": str(ev['betroffene_teams'] or ""), "ort": str(ev.get('ort') or ""),
+                    "farbe": BRAND,
+                })
         if not tasks_df.empty:
             for _, tk in tasks_df[tasks_df['event_id'].isna() & tasks_df['betroffene_teams'].apply(cal_is_relevant)].iterrows():
-                start_iso = parse_to_iso(tk.get('start_zeit'))
-                if start_iso:
-                    icon = "🧑‍⚖️" if "schiedsgericht" in str(tk['kategorie']).lower() else "📋"
-                        
-                    calendar_events.append({
-                        "title": f"{icon} {tk['kategorie']} ({tk.get('betroffene_teams', 'Alle')})",
-                        "start": start_iso,
-                        "end": start_iso,
-                        "backgroundColor": "#5f5f5f",  
-                        "borderColor": "#5f5f5f",
-                        "textColor": "#ffffff"
-                    })
-                        
-        if calendar_events:
-            calendar_options = {
-                "headerToolbar": {
-                    "left": "today prev,next",
-                    "center": "title",
-                    "right": "dayGridMonth,timeGridWeek,listMonth",
-                },
-                "initialView": "dayGridMonth",
-                "navLinks": True,
-                "locale": "de",
-                "firstDay": 1, 
-                "buttonText": {
-                    "today": "Heute",
-                    "month": "Monat",
-                    "week": "Woche",
-                    "list": "Liste"
-                }
-            }
-                
-            custom_css = """
-                .fc-event-title { font-weight: 600; font-size: 0.85em; white-space: normal; }
-                .fc-toolbar-title { font-size: 1.2rem !important; }
-                .fc-button { border-radius: 6px !important; }
-                .fc-theme-standard .fc-scrollgrid { border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
-            """
-                
-            calendar(events=calendar_events, options=calendar_options, custom_css=custom_css, key=f"cal_{selected_cal_team}")
-        else: 
-            st.info("Keine Einträge im Kalender für diesen Filter.")
+                ts = to_ts(tk.get('start_zeit'))
+                if ts is None: continue
+                belegt = int((assign_df['task_id'] == tk['task_id']).sum()) if not assign_df.empty else 0
+                maximal = int(tk.get('max_helfer', 1) or 1)
+                entries.append({
+                    "id": f"tk{tk['task_id']}", "ts": ts, "end": None,
+                    "art": "Aufgabe", "titel": str(tk['kategorie']),
+                    "teams": str(tk.get('betroffene_teams') or "Alle"), "ort": "",
+                    "farbe": "#5f5f5f", "belegt": belegt, "max": maximal,
+                })
+        entries.sort(key=lambda e: e["ts"])
+
+        if not entries:
+            st.info("Keine Termine für diese Auswahl.")
+            return
+
+        WOCHENTAGE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+        MONATE = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
+                  "August", "September", "Oktober", "November", "Dezember"]
+        esc = lambda v: html.escape(str(v))
+
+        def entry_card(e):
+            zeit = e["ts"].strftime("%H:%M")
+            zeit_txt = "" if zeit == "00:00" else f"{zeit} Uhr"
+            details = " · ".join([x for x in [zeit_txt, esc(e["ort"])] if x])
+            if e["art"] == "Aufgabe":
+                frei = max(e["max"] - e["belegt"], 0)
+                status = f'<span class="tub-badge">{frei} frei</span>' if frei else '<span class="tub-badge grey">voll</span>'
+            else:
+                status = ""
+            return f"""
+            <div class="cal-item" style="border-left-color:{e['farbe']}">
+                <div class="cal-date">
+                    <div class="cal-wd">{WOCHENTAGE[e['ts'].weekday()]}</div>
+                    <div class="cal-day">{e['ts'].day}</div>
+                </div>
+                <div class="cal-body">
+                    <div class="cal-kind">{esc(e['art'])} · {esc(e['teams'])}</div>
+                    <div class="cal-title">{esc(e['titel'])} {status}</div>
+                    <div class="cal-meta">{details}</div>
+                </div>
+            </div>"""
+
+        CARD_CSS = f"""
+        <style>
+        .cal-month {{font-weight:700; color:{BRAND}; margin:18px 0 8px 0; font-size:.95rem; text-transform:uppercase; letter-spacing:.06em;}}
+        .cal-item {{display:flex; gap:14px; align-items:flex-start; background:#fff; border:1px solid #eee5ef;
+                   border-left:5px solid {BRAND}; border-radius:12px; padding:10px 14px; margin-bottom:8px;}}
+        .cal-date {{min-width:42px; text-align:center;}}
+        .cal-wd {{font-size:.75rem; color:#777; text-transform:uppercase;}}
+        .cal-day {{font-size:1.45rem; font-weight:700; line-height:1.1;}}
+        .cal-body {{flex:1; min-width:0;}}
+        .cal-kind {{font-size:.75rem; color:#777;}}
+        .cal-title {{font-weight:600; overflow-wrap:anywhere;}}
+        .cal-meta {{font-size:.85rem; color:#555; overflow-wrap:anywhere;}}
+        </style>"""
+
+        def render_list(items):
+            out, last_month = [CARD_CSS], None
+            for e in items:
+                m = (e["ts"].year, e["ts"].month)
+                if m != last_month:
+                    out.append(f'<div class="cal-month">{MONATE[m[1]-1]} {m[0]}</div>')
+                    last_month = m
+                out.append(entry_card(e))
+            # Zeilen ohne Einrückung zusammenfügen, damit Markdown das HTML nicht als Codeblock liest
+            html_block = "".join(line.strip() for line in "".join(out).splitlines())
+            st.markdown(html_block, unsafe_allow_html=True)
+
+        # ---------------- LISTE (Standard, handyfreundlich) ----------------
+        if view == "Liste":
+            heute = pd.Timestamp.now().normalize()
+            kommend = [e for e in entries if e["ts"] >= heute]
+            vergangen = [e for e in entries if e["ts"] < heute][::-1]
+            if kommend:
+                render_list(kommend)
+            else:
+                st.success("Keine anstehenden Termine.")
+            if vergangen:
+                with st.expander(f"Vergangene Termine ({len(vergangen)})"):
+                    render_list(vergangen)
+            return
+
+        # ---------------- MONAT (eher für den PC) ----------------
+        cal_events = []
+        for e in entries:
+            kurz = e["teams"] if e["art"] == "Spieltag" else e["titel"]
+            cal_events.append({
+                "id": e["id"], "title": kurz,
+                "start": e["ts"].isoformat(),
+                "end": (e["end"] or e["ts"]).isoformat(),
+                "backgroundColor": e["farbe"], "borderColor": e["farbe"], "textColor": "#ffffff",
+            })
+        calendar_options = {
+            "initialView": "dayGridMonth",
+            "headerToolbar": {"left": "prev,next", "center": "title", "right": "today"},
+            "buttonText": {"today": "Heute"},
+            "locale": "de",
+            "firstDay": 1,
+            "height": "auto",
+            "dayMaxEvents": 2,
+            "moreLinkText": "mehr",
+            "eventDisplay": "block",
+            "displayEventTime": False,
+            "fixedWeekCount": False,
+        }
+        custom_css = """
+            .fc .fc-toolbar { flex-wrap: wrap; gap: 6px; }
+            .fc .fc-toolbar-title { font-size: 1.05rem !important; }
+            .fc .fc-button { padding: .3em .6em !important; font-size: .85rem !important; border-radius: 8px !important; }
+            .fc .fc-daygrid-day-number { font-size: .8rem; }
+            .fc .fc-col-header-cell-cushion { font-size: .75rem; }
+            .fc .fc-event-title { font-size: .72rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .fc-theme-standard .fc-scrollgrid { border-radius: 10px; overflow: hidden; }
+        """
+        state = calendar(events=cal_events, options=calendar_options, custom_css=custom_css,
+                         key=f"cal_{team_filter}")
+        st.caption("Tippe auf einen Termin, um die Details zu sehen.")
+
+        clicked = None
+        if isinstance(state, dict) and state.get("callback") == "eventClick":
+            clicked = (state.get("eventClick") or {}).get("event", {}).get("id")
+        if clicked:
+            treffer = [e for e in entries if e["id"] == clicked]
+            if treffer:
+                render_list(treffer)
 
     # ----------------------------------------------------
     # TAB 4: FAMILIE
