@@ -1,11 +1,14 @@
+# Ablage im Repo: .streamlit/config.toml
 [theme]
-base = "light"
 primaryColor = "#82368c"
-backgroundColor = "#faf8fb"
-secondaryBackgroundColor = "#f0e9f2"
-textColor = "#2b2230"
+backgroundColor = "#f6f3f9"
+secondaryBackgroundColor = "#ede6f3"
+textColor = "#111827"
 font = "sans serif"
 
-[browser]
-# Keine Nutzungsstatistiken an Streamlit senden
-gatherUsageStats = false
+# Dunkle Seitenleiste (wird von aktuellen Streamlit-Versionen unterstützt)
+[theme.sidebar]
+backgroundColor = "#1f1030"
+secondaryBackgroundColor = "#33204a"
+textColor = "#ffffff"
+primaryColor = "#c99ce1"
