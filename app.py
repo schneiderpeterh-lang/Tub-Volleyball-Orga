@@ -40,9 +40,14 @@ LOGIN_LOCK_MINUTES = 15    # ... innerhalb dieses Zeitraums führen zur Sperre
 # ==========================================
 st.set_page_config(page_title="TuB Helfer-Orga", page_icon="🏐", layout="wide", initial_sidebar_state="auto")
 
-APP_VERSION = "4.8 (Kalender-Export)"
+APP_VERSION = "4.9 (Neues Design)"
 BRAND = "#82368c"        # Vereinslila (aus tub-bocholt.de)
 BRAND_DARK = "#5e2766"
+BRAND_INK = "#1f1030"    # dunkles Aubergine: Seitenleiste und Kopfbereich
+BRAND_LIGHT = "#c99ce1"  # helles Flieder: Akzente auf dunklem Grund
+BRAND_TINT = "#efe3f7"   # sehr helles Flieder: Badges
+PAGE_BG = "#f6f3f9"      # Seitenhintergrund (muss zu .streamlit/config.toml passen)
+CARD_BORDER = "#e6e0ee"
 SCHIRI_COLOR = "#c2410c"  # Orange für Schiedsgericht-Termine
 LOGO_PATH = "logo.png"   # optional: Vereinslogo als logo.png ins Repo legen
 
@@ -51,73 +56,74 @@ def inject_custom_css():
     <style>
     #MainMenu {{visibility: hidden;}}
     footer {{visibility: hidden;}}
+    .stApp {{background: {PAGE_BG};}}
     .block-container {{padding-top: 2rem; max-width: 1200px;}}
 
     /* ---------- Kopfbereich im Vereinsstil ---------- */
     .tub-header {{
-        background: linear-gradient(135deg, {BRAND} 0%, {BRAND_DARK} 100%);
-        color: #fff; padding: 20px 26px; border-radius: 16px; margin-bottom: 22px;
-        box-shadow: 0 6px 18px rgba(94, 39, 102, 0.25);
+        background: {BRAND_INK}; color: #fff;
+        padding: 24px 28px; border-radius: 16px; margin-bottom: 22px;
     }}
-    .tub-header .eyebrow {{font-size: .78rem; letter-spacing: .1em; text-transform: uppercase; opacity: .85;}}
-    .tub-header .title {{font-size: 1.75rem; font-weight: 700; line-height: 1.2; margin-top: 2px;}}
-    .tub-header .sub {{font-size: .95rem; opacity: .9; margin-top: 4px;}}
+    .tub-header .eyebrow {{font-size: .78rem; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: {BRAND_LIGHT};}}
+    .tub-header .title {{font-size: 2.4rem; font-weight: 800; line-height: 1; margin-top: 6px;
+                         text-transform: uppercase; letter-spacing: .01em;}}
+    .tub-header .title span {{color: {BRAND_LIGHT};}}
+    .tub-header .sub {{font-size: .95rem; color: #e9e1f0; margin-top: 8px;}}
     @media (max-width: 640px) {{
-        .tub-header {{padding: 14px 16px; border-radius: 12px;}}
-        .tub-header .title {{font-size: 1.35rem;}}
+        .tub-header {{padding: 18px 18px; border-radius: 14px;}}
+        .tub-header .title {{font-size: 1.8rem;}}
     }}
 
     /* ---------- Abschnittstitel ---------- */
-    .tub-section {{font-size: 1.1rem; font-weight: 700; margin: 6px 0 10px 0; display: flex; align-items: center; gap: 8px;}}
-    .tub-section::before {{content: ""; width: 4px; height: 1.1em; background: {BRAND}; border-radius: 2px; display: inline-block;}}
+    .tub-section {{font-size: 1.1rem; font-weight: 800; text-transform: uppercase; letter-spacing: .03em;
+                   color: #111827; margin: 10px 0 10px 0;}}
 
     /* ---------- Kennzahl-Kacheln (Übersicht) ---------- */
-    .kpi-grid {{display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px;}}
-    @media (max-width: 640px) {{ .kpi-grid {{grid-template-columns: 1fr;}} }}
-    .kpi {{background: #fff; border: 1px solid #eee5ef; border-radius: 14px; padding: 14px 18px;
-           box-shadow: 0 1px 3px rgba(43, 34, 48, 0.06);}}
-    .kpi .label {{font-size: .85rem; color: #555;}}
-    .kpi .value {{font-size: 2rem; font-weight: 700; line-height: 1.15; margin: 4px 0 2px 0;}}
+    .kpi-grid {{display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-bottom: 18px;}}
+    @media (max-width: 640px) {{ .kpi-grid {{grid-template-columns: 1fr; gap: 12px;}} }}
+    .kpi {{background: #fff; border: 1px solid {CARD_BORDER}; border-radius: 16px; padding: 18px 20px;}}
+    .kpi .label {{font-size: .82rem; font-weight: 600; color: #5b6474;}}
+    .kpi .value {{font-size: 2.6rem; font-weight: 800; line-height: 1.05; margin: 8px 0 4px 0; color: #111827;}}
     .kpi .when {{font-size: .95rem; font-weight: 600; color: {BRAND};}}
-    .kpi .sub {{font-size: .82rem; color: #777; margin-top: 4px; overflow-wrap: anywhere;}}
+    .kpi .sub {{font-size: .85rem; color: #5b6474; margin-top: 4px; overflow-wrap: anywhere;}}
 
     /* ---------- Badges ---------- */
     .tub-badge {{
-        display: inline-block; background: rgba(130, 54, 140, 0.12); color: {BRAND};
-        border-radius: 999px; padding: 1px 10px; font-size: .78rem; font-weight: 600; vertical-align: middle;
+        display: inline-block; background: {BRAND_TINT}; color: {BRAND_DARK};
+        border-radius: 999px; padding: 2px 10px; font-size: .78rem; font-weight: 600; vertical-align: middle;
     }}
-    .tub-badge.grey {{background: #ececec; color: #555;}}
-    .tub-badge.sr {{background: rgba(194, 65, 12, .12); color: {SCHIRI_COLOR};}}
+    .tub-badge.grey {{background: #ececf0; color: #4b5563;}}
+    .tub-badge.sr {{background: #fde8dc; color: #9a3412;}}
 
-    /* ---------- Karten (Container mit Rahmen) ---------- */
-    div[data-testid="stVerticalBlockBorderWrapper"],
-    div[data-testid="stContainer"] {{
-        border-radius: 14px; background: #ffffff;
-        box-shadow: 0 1px 3px rgba(43, 34, 48, 0.06);
-        transition: box-shadow .2s ease, border-color .2s ease;
-    }}
-    div[data-testid="stVerticalBlockBorderWrapper"]:hover,
-    div[data-testid="stContainer"]:hover {{
-        box-shadow: 0 6px 16px rgba(43, 34, 48, 0.10);
-    }}
+    /* ---------- Karten ---------- */
+    /* Karten sind Container mit key="card_..."; Formulare und Aufklapper bekommen denselben Stil. */
+    [class*="st-key-card_"] {{background: #fff; border-radius: 16px; border-color: {CARD_BORDER};}}
+    [data-testid="stForm"] {{background: #fff; border-radius: 16px; border-color: {CARD_BORDER};}}
+    [data-testid="stExpander"] details {{background: #fff; border-radius: 14px; border-color: {CARD_BORDER};}}
 
     /* ---------- Buttons ---------- */
-    .stButton > button, .stFormSubmitButton > button {{
-        border-radius: 10px !important; font-weight: 600 !important;
-        transition: all .2s ease !important;
+    .stButton > button, .stFormSubmitButton > button, .stDownloadButton > button {{
+        border-radius: 10px !important; font-weight: 600 !important; min-height: 44px;
     }}
-    .stButton > button:hover, .stFormSubmitButton > button:hover {{transform: translateY(-1px);}}
 
     /* ---------- Tabs (Login) ---------- */
     .stTabs [data-baseweb="tab-list"] {{gap: 8px;}}
     .stTabs [data-baseweb="tab"] {{border-radius: 8px 8px 0 0; padding: 10px 16px;}}
-    .stTabs [aria-selected="true"] {{background-color: rgba(130, 54, 140, 0.10);}}
+    .stTabs [aria-selected="true"] {{background-color: {BRAND_TINT};}}
 
-    /* ---------- Sidebar ---------- */
-    section[data-testid="stSidebar"] {{border-right: 1px solid rgba(130, 54, 140, 0.12);}}
-    .tub-user {{background: #fff; border-radius: 12px; padding: 12px 14px; border: 1px solid rgba(130,54,140,.15);}}
-    .tub-user .name {{font-weight: 700;}}
-    .tub-user .role {{font-size: .82rem; color: {BRAND}; font-weight: 600;}}
+    /* ---------- Seitenleiste (dunkel, wie das Vereinsplakat) ---------- */
+    section[data-testid="stSidebar"] {{background: {BRAND_INK};}}
+    section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"] {{border-radius: 10px; min-height: 44px;}}
+    section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"] span {{color: #fff;}}
+    section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"]:hover {{background: rgba(255, 255, 255, .10);}}
+    section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"][aria-current="page"] {{background: {BRAND};}}
+    section[data-testid="stSidebar"] .stButton > button {{
+        background: transparent; color: #fff; border: 1px solid rgba(255, 255, 255, .40);
+    }}
+    section[data-testid="stSidebar"] .stButton > button:hover {{border-color: #fff; color: #fff;}}
+    .tub-user {{background: rgba(255, 255, 255, .10); border-radius: 12px; padding: 12px 14px;}}
+    .tub-user .name {{font-weight: 700; color: #fff;}}
+    .tub-user .role {{font-size: .82rem; color: {BRAND_LIGHT}; font-weight: 600;}}
     </style>
     """, unsafe_allow_html=True)
 
@@ -127,7 +133,7 @@ def render_header(subtitle="Spieltage, Helferaufgaben und Fahrten an einem Ort")
     st.markdown(f"""
     <div class="tub-header">
         <div class="eyebrow">TuB Bocholt 1907 e.V. · Volleyball</div>
-        <div class="title">Helfer-Orga</div>
+        <div class="title">Helfer-<span>Orga</span></div>
         <div class="sub">{subtitle}</div>
     </div>
     """, unsafe_allow_html=True)
@@ -1255,7 +1261,7 @@ else:
                     ort = tsk.get('ort', '')
                     if 'bocholt' not in ort and ort.strip() != '':
                         found_driver_task = True
-                        with st.container(border=True):
+                        with st.container(border=True, key=f"card_drive_{t_id}"):
                             c_info, c_action = st.columns([3, 2])
                             with c_info:
                                 st.markdown(f"**{html.escape(str(tsk.get('event_titel', 'Event')))}** &nbsp;<span class=\"tub-badge\">Auswärts</span>", unsafe_allow_html=True)
@@ -1333,7 +1339,7 @@ else:
                 
                 if cur_h < max_h:
                     found_open = True
-                    with st.container(border=True):
+                    with st.container(border=True, key=f"card_open_{t_id}"):
                         st.markdown(f"**{html.escape(str(tsk['kategorie']))}** &nbsp;{points_badge(tsk.get('punkte', 1))}", unsafe_allow_html=True)
                         st.caption(f"{tsk['context']} | 🗓️ {tsk['display_date']}")
                         render_capacity(cur_h, max_h)
@@ -1371,7 +1377,7 @@ else:
                     found_mine = True
                     fam_assigns = assign_df[(assign_df['task_id'] == t_id) & (assign_df['user_id'].isin(my_family_uids))]
                     
-                    with st.container(border=True):
+                    with st.container(border=True, key=f"card_mine_{t_id}"):
                         st.markdown(f"**{html.escape(str(tsk['kategorie']))}** &nbsp;{points_badge(tsk.get('punkte', 1))}", unsafe_allow_html=True)
                         st.caption(f"{tsk['context']} | 🗓️ {tsk['display_date']}")
                         
@@ -1779,17 +1785,17 @@ else:
 
         CARD_CSS = f"""
         <style>
-        .cal-month {{font-weight:700; color:{BRAND}; margin:18px 0 8px 0; font-size:.95rem; text-transform:uppercase; letter-spacing:.06em;}}
-        .cal-item {{display:flex; gap:14px; align-items:flex-start; background:#fff; border:1px solid #eee5ef;
-                   border-left:5px solid {BRAND}; border-radius:12px; padding:10px 14px; margin-bottom:8px;}}
-        .cal-date {{min-width:42px; text-align:center;}}
-        .cal-wd {{font-size:.75rem; color:#777; text-transform:uppercase;}}
-        .cal-day {{font-size:1.45rem; font-weight:700; line-height:1.1;}}
+        .cal-month {{font-weight:800; color:{BRAND_DARK}; margin:18px 0 8px 0; font-size:.95rem; text-transform:uppercase; letter-spacing:.06em;}}
+        .cal-item {{display:flex; gap:14px; align-items:flex-start; background:#fff; border:1px solid {CARD_BORDER};
+                   border-left:5px solid {BRAND}; border-radius:14px; padding:12px 14px; margin-bottom:8px;}}
+        .cal-date {{min-width:48px; text-align:center; background:{PAGE_BG}; border-radius:10px; padding:6px 4px;}}
+        .cal-wd {{font-size:.72rem; font-weight:600; color:#5b6474; text-transform:uppercase;}}
+        .cal-day {{font-size:1.45rem; font-weight:800; line-height:1.1;}}
         .cal-body {{flex:1; min-width:0;}}
-        .cal-kind {{font-size:.75rem; color:#777;}}
+        .cal-kind {{font-size:.75rem; color:#5b6474;}}
         .cal-title {{font-weight:600; overflow-wrap:anywhere;}}
         .cal-meta {{font-size:.85rem; color:#555; overflow-wrap:anywhere;}}
-        .tub-badge.sr {{background: rgba(194, 65, 12, .12); color: {SCHIRI_COLOR};}}
+        .tub-badge.sr {{background: #fde8dc; color: #9a3412;}}
         </style>"""
 
         def render_list(items):
@@ -1879,7 +1885,7 @@ else:
             st.caption("Noch keine Kinder verknüpft.")
         else:
             for _, ch in children_df.iterrows():
-                with st.container(border=True):
+                with st.container(border=True, key=f"card_child_{ch['user_id']}"):
                     st.markdown(f"**{html.escape(str(ch['name']))}** &nbsp;<span class=\"tub-badge grey\">{html.escape(str(ch['team']))}</span>",
                                 unsafe_allow_html=True)
                     if 'dsgvo_zeitpunkt' in ch and pd.isna(ch['dsgvo_zeitpunkt']):
